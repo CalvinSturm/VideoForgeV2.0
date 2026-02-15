@@ -138,6 +138,7 @@ pub struct GpuTexture {
 
 // Compile-time proof that GpuTexture is Send + Sync.
 // CudaSlice<u8> is Send + Sync in cudarc, and Arc preserves both.
+#[allow(dead_code)]
 const _: () = {
     fn assert_send_sync<T: Send + Sync>() {}
     fn check() {

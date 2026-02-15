@@ -650,7 +650,7 @@ impl TensorRtBackend {
         input: &GpuTexture,
         output_ptr: u64,
         output_bytes: usize,
-        ctx: &GpuContext,
+        _ctx: &GpuContext,
         _mem_info: &ort::memory::MemoryInfo, // Unused argument if we recreate it, or use it if passed.
     ) -> Result<()> {
         let in_w = input.width as i64;

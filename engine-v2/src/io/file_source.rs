@@ -19,7 +19,7 @@ use crate::error::{EngineError, Result};
 /// The entire file is loaded into memory on first `read_packet()` call.
 /// Subsequent calls return `None` (EOS).
 pub struct FileBitstreamSource {
-    path: PathBuf,
+    _path: PathBuf,
     data: Option<Vec<u8>>,
     sent: bool,
 }
@@ -44,7 +44,7 @@ impl FileBitstreamSource {
         );
 
         Ok(Self {
-            path,
+            _path: path,
             data: Some(data),
             sent: false,
         })

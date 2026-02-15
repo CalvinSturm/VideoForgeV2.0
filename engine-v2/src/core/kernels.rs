@@ -257,7 +257,7 @@ const KERNEL_NAMES: &[&str] = &[
 /// Created once during engine initialization, reused for every frame.
 /// **No per-frame PTX recompilation.**
 pub struct PreprocessKernels {
-    device: Arc<CudaDevice>,
+    _device: Arc<CudaDevice>,
     nv12_to_rgb_f32: CudaFunction,
     nv12_to_rgb_f16: CudaFunction,
     f32_to_f16: CudaFunction,
@@ -298,7 +298,7 @@ impl PreprocessKernels {
         };
 
         let kernels = Self {
-            device: Arc::clone(device),
+            _device: Arc::clone(device),
             nv12_to_rgb_f32: get_fn("nv12_to_rgb_planar_f32")?,
             nv12_to_rgb_f16: get_fn("nv12_to_rgb_planar_f16")?,
             f32_to_f16: get_fn("f32_to_f16")?,
