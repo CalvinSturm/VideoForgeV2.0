@@ -26,3 +26,10 @@ Thumbs.db
 **/*.rs.bk
 # Windows debugging info
 *.pdb
+
+.claude
+
+ffmpeg/
+nvcodec/
+test_videos/
+models/
