@@ -2,7 +2,16 @@
 name = "videoforge-engine"
 version = "2.0.0"
 edition = "2024"
-description = "GPU-native video super-resolution engine. Zero-copy NVDEC→TensorRT→NVENC pipeline."
+description = "Deterministic GPU video inference engine. GPU-resident NVDEC→TensorRT→NVENC super-resolution pipeline in Rust."
+license = "MIT"
+repository = "https://github.com/CalvinSturm/VideoForgeV2.0"
+homepage = "https://github.com/CalvinSturm/VideoForgeV2.0"
+documentation = "https://docs.rs/videoforge-engine"
+# crates.io allows max 5 keywords
+keywords = ["gpu", "video", "tensorrt", "nvdec", "super-resolution"]
+categories = ["multimedia::video", "computer-vision"]
+authors = ["Calvin Sturm <calvinsturm@proton.me>"]
+readme = "../README.md"
 
 [[bin]]
 name = "videoforge"

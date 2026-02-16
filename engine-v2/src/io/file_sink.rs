@@ -49,7 +49,7 @@ impl FileBitstreamSink {
 }
 
 impl BitstreamSink for FileBitstreamSink {
-    fn write_packet(&mut self, data: &[u8], _pts: i64, _is_keyframe: bool) -> Result<()> {
+    fn write_packet(&mut self, data: &[u8], _pts: i64, _dts: i64, _is_keyframe: bool) -> Result<()> {
         self.writer.write_all(data).map_err(|e| {
             EngineError::Encode(format!("Failed to write to {}: {}", self.path.display(), e))
         })?;

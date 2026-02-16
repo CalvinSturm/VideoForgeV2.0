@@ -48,7 +48,7 @@ use crate::error::{EngineError, Result};
 ///
 /// Implementations: file writer, muxer, network sender, etc.
 pub trait BitstreamSink: Send + 'static {
-    fn write_packet(&mut self, data: &[u8], pts: i64, is_keyframe: bool) -> Result<()>;
+    fn write_packet(&mut self, data: &[u8], pts: i64, dts: i64, is_keyframe: bool) -> Result<()>;
     fn flush(&mut self) -> Result<()>;
 }
 
@@ -129,6 +129,10 @@ pub struct NvEncoder {
     config: NvEncConfig,
     /// Frame counter for encode ordering.
     frame_idx: u32,
+    /// Monotonic DTS counter (starts at -b_frames to give B-frame lookahead room).
+    dts_counter: i64,
+    /// Duration of one frame in microseconds.
+    frame_duration_us: i64,
 }
 
 // SAFETY: NvEncoder is only used from the encode stage (single blocking thread).
@@ -273,6 +277,9 @@ impl NvEncoder {
         let bitstream_buf = bs_params.bitstreamBuffer;
         debug!("NVENC bitstream buffer created");
 
+        let dts_counter = -(config.b_frames as i64);
+        let frame_duration_us = 1_000_000 * config.fps_den as i64 / config.fps_num as i64;
+
         Ok(Self {
             encoder,
             fns,
@@ -281,6 +288,8 @@ impl NvEncoder {
             reg_cache: RegistrationCache::new(),
             config,
             frame_idx: 0,
+            dts_counter,
+            frame_duration_us,
         })
     }
 
@@ -399,6 +408,10 @@ impl NvEncoder {
 
         // Copy encoded data to sink.
         let is_idr = matches!(lock_params.pictureType, NV_ENC_PIC_TYPE::IDR);
+        let output_pts = lock_params.outputTimeStamp as i64;
+        let dts = self.dts_counter * self.frame_duration_us;
+        self.dts_counter += 1;
+
         let data = unsafe {
             // SAFETY: bitstreamBufferPtr is valid for bitstreamSizeInBytes.
             std::slice::from_raw_parts(
@@ -407,7 +420,7 @@ impl NvEncoder {
             )
         };
 
-        let sink_result = self.sink.write_packet(data, frame.pts, is_idr);
+        let sink_result = self.sink.write_packet(data, output_pts, dts, is_idr);
 
         // Unlock regardless of sink result.
         // SAFETY: bitstream_buf was locked above.

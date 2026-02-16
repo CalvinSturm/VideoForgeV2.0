@@ -151,7 +151,7 @@ impl FfmpegMuxer {
 }
 
 impl BitstreamSink for FfmpegMuxer {
-    fn write_packet(&mut self, data: &[u8], pts: i64, is_keyframe: bool) -> Result<()> {
+    fn write_packet(&mut self, data: &[u8], pts: i64, dts: i64, is_keyframe: bool) -> Result<()> {
         self.write_header_if_needed()?;
 
         unsafe {
@@ -163,10 +163,9 @@ impl BitstreamSink for FfmpegMuxer {
             }
             ptr::copy_nonoverlapping(data.as_ptr(), (*self.pkt).data, data.len());
 
-            // Rescale PTS from microseconds to stream time_base.
-            let stream_pts = av_rescale_q(pts, self.us_tb, self.time_base);
-            (*self.pkt).pts = stream_pts;
-            (*self.pkt).dts = stream_pts;
+            // Rescale PTS and DTS from microseconds to stream time_base.
+            (*self.pkt).pts = av_rescale_q(pts, self.us_tb, self.time_base);
+            (*self.pkt).dts = av_rescale_q(dts, self.us_tb, self.time_base);
             (*self.pkt).stream_index = 0;
             // Duration = 1 tick in stream time_base (since time_base is fps_den/fps_num,
             // one tick = one frame).
