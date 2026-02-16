@@ -56,17 +56,40 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn};
 
+use crate::codecs::sys::CUevent;
 use crate::core::backend::UpscaleBackend;
 use crate::core::context::{GpuContext, PerfStage};
 use crate::core::kernels::{ModelPrecision, PreprocessKernels, PreprocessPipeline};
 use crate::core::types::{FrameEnvelope, GpuTexture, PixelFormat};
 use crate::error::{EngineError, Result};
 
+// ─── Decoded frame with optional cross-stream sync event ────────────────────
+
+/// A decoded NV12 frame with an optional CUDA event for cross-stream sync.
+///
+/// When produced by a real hardware decoder (NVDEC), `decode_event` carries
+/// the event recorded on `decode_stream` after the D2D copy.  The preprocess
+/// stage calls `cuStreamWaitEvent(preprocess_stream, event)` before reading
+/// the texture — this ensures the decode data is ready without CPU-blocking.
+///
+/// Mock decoders set both fields to `None`.
+pub struct DecodedFrame {
+    pub envelope: FrameEnvelope,
+    /// CUDA event recorded after decode completes.  `None` for mock decoders.
+    pub decode_event: Option<CUevent>,
+    /// Channel to return used events to the decoder's `EventPool` for reuse.
+    pub event_return: Option<std::sync::mpsc::Sender<CUevent>>,
+}
+
+// SAFETY: CUevent is a CUDA handle (*mut c_void) that is safe to send across
+// threads — CUDA events have no thread affinity.
+unsafe impl Send for DecodedFrame {}
+
 // ─── Pipeline stage traits ──────────────────────────────────────────────────
 
 /// Video frame decoder producing GPU-resident NV12 frames.
 pub trait FrameDecoder: Send + 'static {
-    fn decode_next(&mut self) -> Result<Option<FrameEnvelope>>;
+    fn decode_next(&mut self) -> Result<Option<DecodedFrame>>;
 }
 
 /// Video frame encoder consuming GPU-resident NV12 frames.
@@ -222,7 +245,7 @@ impl UpscalePipeline {
         B: UpscaleBackend + 'static,
         E: FrameEncoder,
     {
-        let (tx_decoded, rx_decoded) = mpsc::channel::<FrameEnvelope>(self.config.decoded_capacity);
+        let (tx_decoded, rx_decoded) = mpsc::channel::<DecodedFrame>(self.config.decoded_capacity);
         let (tx_preprocessed, rx_preprocessed) =
             mpsc::channel::<FrameEnvelope>(self.config.preprocessed_capacity);
         let (tx_upscaled, rx_upscaled) =
@@ -822,7 +845,7 @@ impl AuditSuite {
 /// `blocking_send` propagates backpressure from downstream.
 fn decode_stage<D: FrameDecoder>(
     decoder: &mut D,
-    tx: &mpsc::Sender<FrameEnvelope>,
+    tx: &mpsc::Sender<DecodedFrame>,
     cancel: &CancellationToken,
     metrics: &PipelineMetrics,
     queue: &crate::core::context::QueueDepthTracker,
@@ -833,10 +856,10 @@ fn decode_stage<D: FrameDecoder>(
             return Ok(());
         }
         match decoder.decode_next()? {
-            Some(frame) => {
-                debug_assert_eq!(frame.texture.format, PixelFormat::Nv12);
+            Some(decoded) => {
+                debug_assert_eq!(decoded.envelope.texture.format, PixelFormat::Nv12);
                 queue.decode.fetch_add(1, Ordering::Relaxed);
-                if tx.blocking_send(frame).is_err() {
+                if tx.blocking_send(decoded).is_err() {
                     debug!("Decode: downstream closed");
                     queue.decode.fetch_sub(1, Ordering::Relaxed);
                     return Ok(());
@@ -862,7 +885,7 @@ fn decode_stage<D: FrameDecoder>(
 ///
 /// Recycles consumed NV12 buffers for VRAM accounting accuracy.
 async fn preprocess_stage(
-    mut rx: mpsc::Receiver<FrameEnvelope>,
+    mut rx: mpsc::Receiver<DecodedFrame>,
     tx: &mpsc::Sender<FrameEnvelope>,
     _kernels: &PreprocessKernels,
     ctx: &GpuContext,
@@ -875,7 +898,7 @@ async fn preprocess_stage(
         PreprocessPipeline::new(PreprocessKernels::compile(ctx.device())?, precision);
 
     loop {
-        let frame = tokio::select! {
+        let decoded = tokio::select! {
             biased;
             _ = cancel.cancelled() => {
                 debug!("Preprocess cancelled");
@@ -898,12 +921,24 @@ async fn preprocess_stage(
             break;
         }
 
+        // Cross-stream sync: make preprocess_stream wait for decode to finish
+        // the D2D copy before we read the NV12 texture.
+        if let Some(event) = decoded.decode_event {
+            crate::codecs::nvdec::wait_for_event(&ctx.preprocess_stream, event)?;
+        }
+
+        let frame = decoded.envelope;
         let t_start = Instant::now();
 
         let model_input = preprocess.prepare(&frame.texture, ctx, &ctx.preprocess_stream)?;
 
-        // Stream sync before releasing NV12 buffer — ensures kernel completed.
+        // Stream sync before releasing NV12 buffer — ensures preprocess kernel completed.
         GpuContext::sync_stream(&ctx.preprocess_stream)?;
+
+        // Recycle the decode event back to the decoder's EventPool.
+        if let (Some(event), Some(returner)) = (decoded.decode_event, &decoded.event_return) {
+            let _ = returner.send(event);
+        }
 
         let elapsed_us = t_start.elapsed().as_micros() as u64;
         metrics
@@ -934,20 +969,6 @@ async fn preprocess_stage(
             return Err(EngineError::ChannelClosed);
         }
         metrics.frames_preprocessed.fetch_add(1, Ordering::Release);
-        // Preprocess queue decrement happens when next stage receives?
-        // No, `tx.send` pushes it to channel. Channel is technically "inference input queue".
-        // Use standard convention: "In Queue" = "In Channel" + "Processing".
-        // So we don't decrement `preprocess` yet?
-        // Simpler model:
-        // Decode depth = items in tx_decoded + items in preprocess_stage before processing.
-        // Pipeline:
-        // [Decode] -> (ch) -> [Preprocess] -> (ch) -> [Infer] -> (ch) -> [Encode]
-        //
-        // Tracking "Active items in stage":
-        // Preprocess depth = processing count.
-        // Channel depth is implied.
-        // Let's stick to "Active Processing Depth" for observability.
-        // So decrement `preprocess` after send.
         ctx.queue_depth.preprocess.fetch_sub(1, Ordering::Relaxed);
     }
     Ok(())
@@ -1131,7 +1152,7 @@ impl MockDecoder {
 }
 
 impl FrameDecoder for MockDecoder {
-    fn decode_next(&mut self) -> Result<Option<FrameEnvelope>> {
+    fn decode_next(&mut self) -> Result<Option<DecodedFrame>> {
         if self.remaining == 0 {
             return Ok(None);
         }
@@ -1158,7 +1179,11 @@ impl FrameDecoder for MockDecoder {
             is_keyframe: self.idx % 30 == 0,
         };
         self.idx += 1;
-        Ok(Some(envelope))
+        Ok(Some(DecodedFrame {
+            envelope,
+            decode_event: None,
+            event_return: None,
+        }))
     }
 }
 

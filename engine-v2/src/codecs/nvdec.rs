@@ -50,7 +50,7 @@ use tracing::{debug, info};
 use crate::codecs::sys::*;
 use crate::core::context::GpuContext;
 use crate::core::types::{FrameEnvelope, GpuTexture, PixelFormat};
-use crate::engine::pipeline::FrameDecoder;
+use crate::engine::pipeline::{DecodedFrame, FrameDecoder};
 use crate::error::{EngineError, Result};
 
 // ─── Bitstream source trait ──────────────────────────────────────────────
@@ -71,19 +71,6 @@ pub struct BitstreamPacket {
     pub pts: i64,
     /// Whether this packet encodes an IDR/keyframe.
     pub is_keyframe: bool,
-}
-
-// ─── Decoded frame event ─────────────────────────────────────────────────
-
-/// A decoded NV12 frame with its associated sync event.
-///
-/// The preprocess stage MUST wait on `decode_event` before reading
-/// `texture.data` to ensure the D2D copy has completed on `decode_stream`.
-pub struct DecodedFrame {
-    pub envelope: FrameEnvelope,
-    /// CUDA event recorded on `decode_stream` after D2D copy.
-    /// Downstream calls `cuStreamWaitEvent(preprocess_stream, event, 0)`.
-    pub decode_event: CUevent,
 }
 
 // ─── Per-frame event pool ────────────────────────────────────────────────
@@ -163,9 +150,10 @@ pub struct NvDecoder {
     events: EventPool,
     frame_index: u64,
     eos_sent: bool,
-    /// Per-frame sync events returned with decoded frames.
-    /// Caller must wait on these before reading the texture.
-    pub last_decode_event: Option<CUevent>,
+    /// Sender half embedded in each `DecodedFrame` for event recycling.
+    event_return_tx: std::sync::mpsc::Sender<CUevent>,
+    /// Receiver half drained in `decode_next()` to recycle events.
+    event_return_rx: std::sync::mpsc::Receiver<CUevent>,
 }
 
 unsafe impl Send for NvDecoder {}
@@ -215,6 +203,8 @@ impl NvDecoder {
 
         info!(?codec, "NVDEC parser created");
 
+        let (event_return_tx, event_return_rx) = std::sync::mpsc::channel();
+
         Ok(Self {
             parser,
             ctx,
@@ -223,7 +213,8 @@ impl NvDecoder {
             events: EventPool::new(),
             frame_index: 0,
             eos_sent: false,
-            last_decode_event: None,
+            event_return_tx,
+            event_return_rx,
         })
     }
 
@@ -413,7 +404,8 @@ impl NvDecoder {
 
         Ok(DecodedFrame {
             envelope,
-            decode_event: event,
+            decode_event: Some(event),
+            event_return: Some(self.event_return_tx.clone()),
         })
     }
 }
@@ -422,16 +414,21 @@ impl FrameDecoder for NvDecoder {
     /// Decode the next frame.
     ///
     /// Feeds bitstream packets to the parser until a decoded frame is
-    /// available, then maps/copies it and returns the `FrameEnvelope`.
+    /// available, then maps/copies it and returns the `DecodedFrame` with
+    /// its cross-stream sync event.
     ///
     /// Returns `None` at EOS.
-    fn decode_next(&mut self) -> Result<Option<FrameEnvelope>> {
+    fn decode_next(&mut self) -> Result<Option<DecodedFrame>> {
+        // Drain recycled events from the preprocess stage back into the pool.
+        while let Ok(event) = self.event_return_rx.try_recv() {
+            self.events.release(event);
+        }
+
         loop {
             // Check if we have a pending decoded frame.
             if let Some(disp) = self.cb_state.pending_display.pop_front() {
                 let decoded = self.map_and_copy(&disp)?;
-                self.last_decode_event = Some(decoded.decode_event);
-                return Ok(Some(decoded.envelope));
+                return Ok(Some(decoded));
             }
 
             // No pending frame — feed more bitstream.
@@ -471,8 +468,8 @@ impl Drop for NvDecoder {
             }
         }
 
-        // Return last event to pool for cleanup.
-        if let Some(event) = self.last_decode_event.take() {
+        // Drain any remaining recycled events back into the pool for cleanup.
+        while let Ok(event) = self.event_return_rx.try_recv() {
             self.events.release(event);
         }
 
