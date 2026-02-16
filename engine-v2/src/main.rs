@@ -310,16 +310,8 @@ async fn run_pipeline(cli: Cli) -> Result<()> {
         nv12_pitch: nv12_pitch as u32,
     };
 
-    // Get the raw CUDA context handle for NVENC.
-    // SAFETY: cudarc's CudaDevice wraps a CUcontext.  We extract the raw
-    // handle using the same transmute approach as get_raw_stream().
-    let cuda_ctx_raw: *mut std::ffi::c_void = unsafe {
-        let device = ctx.device();
-        // CudaDevice stores the CUcontext as its first field.
-        let ptr =
-            device.as_ref() as *const cudarc::driver::CudaDevice as *const *mut std::ffi::c_void;
-        *ptr
-    };
+    let cuda_ctx_raw: *mut std::ffi::c_void =
+        *ctx.device().cu_primary_ctx() as *mut std::ffi::c_void;
 
     let encoder = NvEncoder::new(cuda_ctx_raw, sink, enc_config)?;
 

@@ -357,13 +357,6 @@ impl NvDecoder {
             Height: (height / 2) as usize,
         };
 
-        // Get the raw CUstream handle for decode_stream.
-        // SAFETY: We pass the stream handle obtained from cudarc's internal
-        // representation.  cudarc::CudaStream wraps a CUstream but does not
-        // expose it publicly.  We use transmute to extract it.
-        //
-        // This is fragile but necessary because cudarc 0.12 does not provide
-        // a public `raw()` or `as_raw()` method on CudaStream.
         let decode_stream_raw = get_raw_stream(&self.ctx.decode_stream);
 
         // SAFETY: src_ptr is a valid mapped NVDEC surface.
@@ -585,28 +578,9 @@ unsafe extern "C" fn display_callback(
     1 // Success.
 }
 
-// ─── Raw stream handle extraction ────────────────────────────────────────
-
-/// Extract raw CUstream handle from cudarc's CudaStream.
-///
-/// # Safety
-///
-/// This relies on cudarc 0.12's internal layout where CudaStream stores
-/// the raw CUstream as its first field.  If cudarc changes its layout,
-/// this will break.  A compile-time size assertion helps catch this.
-///
-/// TODO: Replace with `CudaStream::as_raw()` when cudarc exposes it.
+/// Get the raw CUstream handle from a cudarc CudaStream.
 pub fn get_raw_stream(stream: &cudarc::driver::CudaStream) -> CUstream {
-    // cudarc::CudaStream in 0.12 is a repr(transparent) wrapper over
-    // the internal stream type.  We read the first pointer-sized field.
-    //
-    // SAFETY: We're reading a pointer value from a struct that wraps a
-    // CUDA stream handle.  The handle is valid for the lifetime of the
-    // CudaStream reference.
-    unsafe {
-        let ptr = stream as *const cudarc::driver::CudaStream as *const CUstream;
-        *ptr
-    }
+    stream.stream as CUstream
 }
 
 // ─── Stream wait helper (public for pipeline use) ────────────────────────
