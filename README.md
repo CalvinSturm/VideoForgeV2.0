@@ -55,6 +55,11 @@ target/debug/rave benchmark --input in.mp4 --model model.onnx --skip-encode --pr
 target/debug/rave devices --json
 ```
 
+Structured JSON contract:
+- `--json` writes exactly one final JSON object to stdout.
+- Success payloads include `"ok": true`; failures include `"ok": false` and `"error": "<message>"`.
+- Progress records never go to stdout; they go to stderr only when `--progress human|jsonl` or `--jsonl` is set.
+
 Progress stream contract (`--progress jsonl` or `--jsonl`):
 - Stream: `stderr` only (stdout remains the final human summary or `--json` payload).
 - Cadence: at most 1 line/sec while frame counters change, plus one final line with `final=true`.

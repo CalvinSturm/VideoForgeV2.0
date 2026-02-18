@@ -11,7 +11,7 @@ Scope guardrails:
 - [x] Help text is concise, accurate, and includes copy-paste examples.
 - [x] Structured `--json` output is explicit and test-covered.
 - [x] Human-readable default output is clear for non-JSON mode.
-- [ ] `probe`/`devices` ergonomics are practical for operator workflows.
+- [x] `probe`/`devices` ergonomics are practical for operator workflows.
 - [x] Progress output is visible and script-friendly.
 - [x] CLI docs match actual command behavior.
 - [x] CLI tests cover help, JSON schema shape, and non-JSON output.
@@ -37,7 +37,7 @@ Scope guardrails:
 - Add tests for flag wiring/help and progress mode behavior.
 - Update docs for interactive vs scripted usage.
 
-4. PR11-4: Docs + Consistency Sweep (Next)
+4. PR11-4: Docs + Consistency Sweep (Done)
 - Ensure all scripts/docs use current CLI shape.
 - Tighten wording, examples, and JSON schema notes.
 - Final CLI polish pass with tests.

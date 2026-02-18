@@ -436,3 +436,92 @@ fn upscale_dry_run_json_mode_is_clean_stdout_even_with_progress_flags() {
         "dry-run should not emit progress records, got stderr: {stderr}"
     );
 }
+
+#[test]
+fn benchmark_json_mode_emits_structured_error_on_failure() {
+    let dir = unique_temp_dir("benchmark_json_error");
+    let missing_input = dir.join("missing.265");
+    let missing_model = dir.join("missing.onnx");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rave"))
+        .args([
+            "benchmark",
+            "--input",
+            missing_input.to_str().expect("utf8 input"),
+            "--model",
+            missing_model.to_str().expect("utf8 model"),
+            "--json",
+        ])
+        .output()
+        .expect("run rave benchmark --json with missing paths");
+
+    assert!(
+        !output.status.success(),
+        "benchmark should fail for missing paths"
+    );
+    let stdout_value: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|e| panic!("benchmark error stdout is not JSON: {e}"));
+    assert_eq!(
+        stdout_value.get("command").and_then(|v| v.as_str()),
+        Some("benchmark")
+    );
+    assert_eq!(
+        stdout_value.get("ok").and_then(|v| v.as_bool()),
+        Some(false)
+    );
+    assert!(
+        stdout_value.get("error").and_then(|v| v.as_str()).is_some(),
+        "missing error field in benchmark json error payload"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("Command failed"),
+        "json mode should not emit default error line on stderr: {stderr}"
+    );
+}
+
+#[test]
+fn upscale_json_mode_emits_structured_error_on_failure() {
+    let dir = unique_temp_dir("upscale_json_error");
+    let missing_input = dir.join("missing.265");
+    let missing_model = dir.join("missing.onnx");
+    let output_path = dir.join("out.265");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rave"))
+        .args([
+            "upscale",
+            "--input",
+            missing_input.to_str().expect("utf8 input"),
+            "--output",
+            output_path.to_str().expect("utf8 output"),
+            "--model",
+            missing_model.to_str().expect("utf8 model"),
+            "--json",
+        ])
+        .output()
+        .expect("run rave upscale --json with missing paths");
+
+    assert!(
+        !output.status.success(),
+        "upscale should fail for missing paths"
+    );
+    let stdout_value: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|e| panic!("upscale error stdout is not JSON: {e}"));
+    assert_eq!(
+        stdout_value.get("command").and_then(|v| v.as_str()),
+        Some("upscale")
+    );
+    assert_eq!(
+        stdout_value.get("ok").and_then(|v| v.as_bool()),
+        Some(false)
+    );
+    assert!(
+        stdout_value.get("error").and_then(|v| v.as_str()).is_some(),
+        "missing error field in upscale json error payload"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("Command failed"),
+        "json mode should not emit default error line on stderr: {stderr}"
+    );
+}

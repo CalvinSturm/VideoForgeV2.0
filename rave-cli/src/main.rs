@@ -390,10 +390,13 @@ fn main() {
     init_tracing();
 
     let cli = Cli::parse();
-    let emit_json_error = matches!(
-        &cli.command,
-        Commands::Probe(args) if args.json
-    ) || matches!(&cli.command, Commands::Devices(args) if args.json);
+    let json_error_command = match &cli.command {
+        Commands::Probe(args) if args.json => Some("probe"),
+        Commands::Devices(args) if args.json => Some("devices"),
+        Commands::Upscale(args) if args.json => Some("upscale"),
+        Commands::Benchmark(args) if args.json => Some("benchmark"),
+        _ => None,
+    };
 
     let result = match cli.command {
         Commands::Probe(args) => run_probe(args),
@@ -411,7 +414,9 @@ fn main() {
     match result {
         Ok(()) => std::process::exit(0),
         Err(err) => {
-            if !emit_json_error {
+            if let Some(command) = json_error_command {
+                println!("{}", command_error_json(command, &err.to_string()));
+            } else {
                 tracing::error!(error = %err, code = err.error_code(), "Command failed");
             }
             std::process::exit(err.error_code() as i32);
@@ -621,15 +626,7 @@ fn build_runtime() -> tokio::runtime::Runtime {
 }
 
 fn run_probe(args: ProbeArgs) -> Result<()> {
-    let (driver_version, devices) = match enumerate_cuda_devices() {
-        Ok(v) => v,
-        Err(err) => {
-            if args.json {
-                println!("{}", command_error_json("probe", &err.to_string()));
-            }
-            return Err(err);
-        }
-    };
+    let (driver_version, devices) = enumerate_cuda_devices()?;
     if args.all {
         let mut results = Vec::<ProbeDeviceResult>::new();
         let mut successes = 0usize;
@@ -698,15 +695,7 @@ fn run_probe(args: ProbeArgs) -> Result<()> {
 
     let device = args.device.unwrap_or(0) as usize;
     let dev_info = devices.iter().find(|d| d.ordinal as usize == device);
-    let ctx = match GpuContext::new(device) {
-        Ok(ctx) => ctx,
-        Err(err) => {
-            if args.json {
-                println!("{}", command_error_json("probe", &err.to_string()));
-            }
-            return Err(err);
-        }
-    };
+    let ctx = GpuContext::new(device)?;
     let (vram_current, vram_peak) = ctx.vram_usage();
 
     if args.json {
@@ -737,15 +726,7 @@ fn run_probe(args: ProbeArgs) -> Result<()> {
 }
 
 fn run_devices(args: DevicesArgs) -> Result<()> {
-    let (driver_version, devices) = match enumerate_cuda_devices() {
-        Ok(v) => v,
-        Err(err) => {
-            if args.json {
-                println!("{}", command_error_json("devices", &err.to_string()));
-            }
-            return Err(err);
-        }
-    };
+    let (driver_version, devices) = enumerate_cuda_devices()?;
     if args.json {
         println!("{}", devices_json(driver_version, &devices));
     } else {
