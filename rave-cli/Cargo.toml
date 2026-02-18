@@ -1,0 +1,24 @@
+[package]
+name = "rave-cli"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "rave"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+rave-core = { path = "../crates/rave-core" }
+rave-cuda = { path = "../crates/rave-cuda" }
+rave-ffmpeg = { path = "../crates/rave-ffmpeg" }
+rave-nvcodec = { path = "../crates/rave-nvcodec" }
+rave-pipeline = { path = "../crates/rave-pipeline" }
+rave-tensorrt = { path = "../crates/rave-tensorrt" }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "signal", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+serde_json = "1"

@@ -1,0 +1,11 @@
+[workspace]
+members = [
+  "crates/rave-core",
+  "crates/rave-cuda",
+  "crates/rave-ffmpeg",
+  "crates/rave-nvcodec",
+  "crates/rave-pipeline",
+  "crates/rave-tensorrt",
+  "rave-cli",
+]
+resolver = "2"
