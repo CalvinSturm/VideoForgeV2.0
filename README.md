@@ -57,6 +57,7 @@ target/debug/rave devices --json
 
 Structured JSON contract:
 - `--json` writes exactly one final JSON object to stdout.
+- JSON payloads include `"schema_version": 1`.
 - Success payloads include `"ok": true`; failures include `"ok": false` and `"error": "<message>"`.
 - Progress records never go to stdout; they go to stderr only when `--progress human|jsonl` or `--jsonl` is set.
 
@@ -66,12 +67,12 @@ Progress stream contract (`--progress jsonl` or `--jsonl`):
 - Units: `elapsed_ms` is wall-clock milliseconds; frame counters are cumulative counts.
 - Schema:
 ```json
-{"type":"progress","command":"benchmark|upscale","elapsed_ms":1234,"frames":{"decoded":120,"inferred":118,"encoded":0},"final":false}
+{"schema_version":1,"type":"progress","command":"benchmark|upscale","elapsed_ms":1234,"frames":{"decoded":120,"inferred":118,"encoded":0},"final":false}
 ```
 - Example lines:
 ```json
-{"type":"progress","command":"benchmark","elapsed_ms":1012,"frames":{"decoded":96,"inferred":94,"encoded":0},"final":false}
-{"type":"progress","command":"benchmark","elapsed_ms":14892,"frames":{"decoded":1421,"inferred":1421,"encoded":0},"final":true}
+{"schema_version":1,"type":"progress","command":"benchmark","elapsed_ms":1012,"frames":{"decoded":96,"inferred":94,"encoded":0},"final":false}
+{"schema_version":1,"type":"progress","command":"benchmark","elapsed_ms":14892,"frames":{"decoded":1421,"inferred":1421,"encoded":0},"final":true}
 ```
 
 ## WSL2 + CUDA + ONNX Runtime TensorRT EP

@@ -320,7 +320,8 @@ impl BenchmarkSummary {
         };
 
         format!(
-            "{{\"command\":\"benchmark\",\"ok\":true,\"fps\":{},\"frames\":{},\"elapsed_ms\":{},\"stages\":{{\"decode\":{},\"infer\":{},\"encode\":{}}}}}",
+            "{{\"schema_version\":{},\"command\":\"benchmark\",\"ok\":true,\"fps\":{},\"frames\":{},\"elapsed_ms\":{},\"stages\":{{\"decode\":{},\"infer\":{},\"encode\":{}}}}}",
+            JSON_SCHEMA_VERSION,
             json_number(self.fps),
             self.frames,
             json_number(self.elapsed_ms),
@@ -376,6 +377,7 @@ struct ProgressSnapshot {
 
 // Known container extensions.
 const CONTAINER_EXTENSIONS: &[&str] = &["mp4", "mkv", "mov", "avi", "webm", "ts", "flv"];
+const JSON_SCHEMA_VERSION: u32 = 1;
 
 fn is_container(path: &Path) -> bool {
     path.extension()
@@ -1136,7 +1138,8 @@ fn emit_progress_line(
         }
         ProgressMode::Jsonl => {
             eprintln!(
-                "{{\"type\":\"progress\",\"command\":{},\"elapsed_ms\":{},\"frames\":{{\"decoded\":{},\"inferred\":{},\"encoded\":{}}},\"final\":{}}}",
+                "{{\"schema_version\":{},\"type\":\"progress\",\"command\":{},\"elapsed_ms\":{},\"frames\":{{\"decoded\":{},\"inferred\":{},\"encoded\":{}}},\"final\":{}}}",
+                JSON_SCHEMA_VERSION,
                 json_string(command),
                 elapsed.as_millis(),
                 snapshot.decoded,
@@ -1211,7 +1214,8 @@ fn json_string(value: &str) -> String {
 
 fn command_error_json(command: &str, error: &str) -> String {
     format!(
-        "{{\"command\":{},\"ok\":false,\"error\":{}}}",
+        "{{\"schema_version\":{},\"command\":{},\"ok\":false,\"error\":{}}}",
+        JSON_SCHEMA_VERSION,
         json_string(command),
         json_string(error)
     )
@@ -1230,8 +1234,14 @@ fn probe_json_single(
         .unwrap_or_else(|| "\"unknown\"".to_string());
     let total_mem_mb = total_mem_bytes.unwrap_or(0) / (1024 * 1024);
     format!(
-        "{{\"command\":\"probe\",\"ok\":true,\"device\":{},\"name\":{},\"total_mem_mb\":{},\"cuda_driver_version\":{},\"vram_current_mb\":{},\"vram_peak_mb\":{}}}",
-        device, name_field, total_mem_mb, driver_version, vram_current_mb, vram_peak_mb
+        "{{\"schema_version\":{},\"command\":\"probe\",\"ok\":true,\"device\":{},\"name\":{},\"total_mem_mb\":{},\"cuda_driver_version\":{},\"vram_current_mb\":{},\"vram_peak_mb\":{}}}",
+        JSON_SCHEMA_VERSION,
+        device,
+        name_field,
+        total_mem_mb,
+        driver_version,
+        vram_current_mb,
+        vram_peak_mb
     )
 }
 
@@ -1251,7 +1261,8 @@ fn upscale_json(
     vram_peak_mb: usize,
 ) -> String {
     format!(
-        "{{\"command\":\"upscale\",\"ok\":true,\"dry_run\":{},\"input\":{},\"output\":{},\"model\":{},\"codec\":{},\"width\":{},\"height\":{},\"fps_num\":{},\"fps_den\":{},\"elapsed_ms\":{},\"vram_current_mb\":{},\"vram_peak_mb\":{}}}",
+        "{{\"schema_version\":{},\"command\":\"upscale\",\"ok\":true,\"dry_run\":{},\"input\":{},\"output\":{},\"model\":{},\"codec\":{},\"width\":{},\"height\":{},\"fps_num\":{},\"fps_den\":{},\"elapsed_ms\":{},\"vram_current_mb\":{},\"vram_peak_mb\":{}}}",
+        JSON_SCHEMA_VERSION,
         dry_run,
         json_string(&input.display().to_string()),
         json_string(&output.display().to_string()),
@@ -1281,8 +1292,8 @@ fn devices_json(driver_version: i32, devices: &[CudaDeviceInfo]) -> String {
         .collect::<Vec<_>>()
         .join(",");
     format!(
-        "{{\"command\":\"devices\",\"ok\":true,\"cuda_driver_version\":{},\"devices\":[{}]}}",
-        driver_version, entries
+        "{{\"schema_version\":{},\"command\":\"devices\",\"ok\":true,\"cuda_driver_version\":{},\"devices\":[{}]}}",
+        JSON_SCHEMA_VERSION, driver_version, entries
     )
 }
 
@@ -1310,8 +1321,8 @@ fn probe_all_json(driver_version: i32, rows: &[ProbeDeviceResult]) -> String {
         .collect::<Vec<_>>()
         .join(",");
     format!(
-        "{{\"command\":\"probe\",\"ok\":{},\"all\":true,\"cuda_driver_version\":{},\"results\":[{}]}}",
-        ok, driver_version, entries
+        "{{\"schema_version\":{},\"command\":\"probe\",\"ok\":{},\"all\":true,\"cuda_driver_version\":{},\"results\":[{}]}}",
+        JSON_SCHEMA_VERSION, ok, driver_version, entries
     )
 }
 

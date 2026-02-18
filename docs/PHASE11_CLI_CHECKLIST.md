@@ -15,6 +15,7 @@ Scope guardrails:
 - [x] Progress output is visible and script-friendly.
 - [x] CLI docs match actual command behavior.
 - [x] CLI tests cover help, JSON schema shape, and non-JSON output.
+- [x] JSON contract versioning is explicit for parsers.
 
 ## Proposed PR Slices
 
@@ -41,3 +42,8 @@ Scope guardrails:
 - Ensure all scripts/docs use current CLI shape.
 - Tighten wording, examples, and JSON schema notes.
 - Final CLI polish pass with tests.
+
+5. PR11-5: JSON Contract Versioning (Done)
+- Add `schema_version` to all CLI JSON payloads and progress JSONL.
+- Add parser-focused tests for `probe --json` / `devices --json`.
+- Document schema/version expectations in README.

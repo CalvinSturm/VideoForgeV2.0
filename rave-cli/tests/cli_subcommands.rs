@@ -18,6 +18,14 @@ fn write_dummy_file(path: &PathBuf) {
     fs::write(path, b"dummy").expect("write dummy file");
 }
 
+fn assert_schema_version(value: &serde_json::Value) {
+    assert_eq!(
+        value.get("schema_version").and_then(|v| v.as_u64()),
+        Some(1),
+        "missing schema_version=1 field"
+    );
+}
+
 #[test]
 fn help_lists_subcommands() {
     let output = Command::new(env!("CARGO_BIN_EXE_rave"))
@@ -113,6 +121,48 @@ fn devices_help_lists_json() {
 }
 
 #[test]
+fn probe_json_emits_schema_and_command_fields() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rave"))
+        .args(["probe", "--json"])
+        .output()
+        .expect("run rave probe --json");
+
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|e| panic!("probe --json stdout is not JSON: {e}"));
+    assert_schema_version(&value);
+    assert_eq!(
+        value.get("command").and_then(|v| v.as_str()),
+        Some("probe"),
+        "missing command=probe field"
+    );
+    assert!(
+        value.get("ok").and_then(|v| v.as_bool()).is_some(),
+        "missing boolean ok field"
+    );
+}
+
+#[test]
+fn devices_json_emits_schema_and_command_fields() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rave"))
+        .args(["devices", "--json"])
+        .output()
+        .expect("run rave devices --json");
+
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|e| panic!("devices --json stdout is not JSON: {e}"));
+    assert_schema_version(&value);
+    assert_eq!(
+        value.get("command").and_then(|v| v.as_str()),
+        Some("devices"),
+        "missing command=devices field"
+    );
+    assert!(
+        value.get("ok").and_then(|v| v.as_bool()).is_some(),
+        "missing boolean ok field"
+    );
+}
+
+#[test]
 fn upscale_dry_run_accepts_subcommand_args() {
     let dir = unique_temp_dir("upscale");
     let input = dir.join("input.265");
@@ -204,6 +254,7 @@ fn benchmark_dry_run_emits_valid_json_shape() {
 
     let value: serde_json::Value = serde_json::from_slice(&output.stdout)
         .unwrap_or_else(|e| panic!("benchmark output is not valid JSON: {e}"));
+    assert_schema_version(&value);
     assert!(
         value.get("fps").and_then(|v| v.as_f64()).is_some(),
         "missing numeric fps field"
@@ -217,6 +268,7 @@ fn benchmark_dry_run_emits_valid_json_shape() {
         &fs::read(&json_out).expect("benchmark --json-out file should exist"),
     )
     .expect("benchmark --json-out should contain valid JSON");
+    assert_schema_version(&json_out_value);
     assert!(
         json_out_value.get("stages").is_some(),
         "missing stages in benchmark --json-out payload"
@@ -326,6 +378,7 @@ fn benchmark_dry_run_json_mode_is_clean_stdout_even_with_progress_flags() {
 
     let stdout_value: serde_json::Value = serde_json::from_slice(&output.stdout)
         .unwrap_or_else(|e| panic!("benchmark stdout is not clean JSON: {e}"));
+    assert_schema_version(&stdout_value);
     assert_eq!(
         stdout_value.get("command").and_then(|v| v.as_str()),
         Some("benchmark")
@@ -370,6 +423,7 @@ fn upscale_dry_run_json_emits_valid_json_shape() {
 
     let value: serde_json::Value = serde_json::from_slice(&output.stdout)
         .unwrap_or_else(|e| panic!("upscale json dry-run output is not valid JSON: {e}"));
+    assert_schema_version(&value);
     assert_eq!(
         value.get("command").and_then(|v| v.as_str()),
         Some("upscale"),
@@ -425,6 +479,7 @@ fn upscale_dry_run_json_mode_is_clean_stdout_even_with_progress_flags() {
 
     let stdout_value: serde_json::Value = serde_json::from_slice(&output.stdout)
         .unwrap_or_else(|e| panic!("upscale stdout is not clean JSON: {e}"));
+    assert_schema_version(&stdout_value);
     assert_eq!(
         stdout_value.get("command").and_then(|v| v.as_str()),
         Some("upscale")
@@ -461,6 +516,7 @@ fn benchmark_json_mode_emits_structured_error_on_failure() {
     );
     let stdout_value: serde_json::Value = serde_json::from_slice(&output.stdout)
         .unwrap_or_else(|e| panic!("benchmark error stdout is not JSON: {e}"));
+    assert_schema_version(&stdout_value);
     assert_eq!(
         stdout_value.get("command").and_then(|v| v.as_str()),
         Some("benchmark")
@@ -507,6 +563,7 @@ fn upscale_json_mode_emits_structured_error_on_failure() {
     );
     let stdout_value: serde_json::Value = serde_json::from_slice(&output.stdout)
         .unwrap_or_else(|e| panic!("upscale error stdout is not JSON: {e}"));
+    assert_schema_version(&stdout_value);
     assert_eq!(
         stdout_value.get("command").and_then(|v| v.as_str()),
         Some("upscale")
