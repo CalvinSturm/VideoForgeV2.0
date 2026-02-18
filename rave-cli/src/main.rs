@@ -142,7 +142,7 @@ struct UpscaleArgs {
     #[arg(long = "json", default_value_t = false)]
     json: bool,
 
-    /// Progress output mode: auto (TTY only), off, human, jsonl.
+    /// Progress output mode to stderr: auto (TTY only), off, human, jsonl.
     #[arg(long = "progress", value_enum, default_value_t = ProgressArg::Auto)]
     progress: ProgressArg,
 
@@ -184,7 +184,7 @@ struct BenchmarkArgs {
     #[arg(long = "dry-run", default_value_t = false)]
     dry_run: bool,
 
-    /// Progress output mode: auto (TTY only), off, human, jsonl.
+    /// Progress output mode to stderr: auto (TTY only), off, human, jsonl.
     #[arg(long = "progress", value_enum, default_value_t = ProgressArg::Auto)]
     progress: ProgressArg,
 
@@ -1139,6 +1139,7 @@ fn emit_progress_line(
     snapshot: ProgressSnapshot,
     final_line: bool,
 ) {
+    // Progress contract: progress events are written to stderr only.
     match mode {
         ProgressMode::Off => {}
         ProgressMode::Human => {

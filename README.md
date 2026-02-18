@@ -55,6 +55,20 @@ target/debug/rave benchmark --input in.mp4 --model model.onnx --skip-encode --pr
 target/debug/rave devices --json
 ```
 
+Progress stream contract (`--progress jsonl` or `--jsonl`):
+- Stream: `stderr` only (stdout remains the final human summary or `--json` payload).
+- Cadence: at most 1 line/sec while frame counters change, plus one final line with `final=true`.
+- Units: `elapsed_ms` is wall-clock milliseconds; frame counters are cumulative counts.
+- Schema:
+```json
+{"type":"progress","command":"benchmark|upscale","elapsed_ms":1234,"frames":{"decoded":120,"inferred":118,"encoded":0},"final":false}
+```
+- Example lines:
+```json
+{"type":"progress","command":"benchmark","elapsed_ms":1012,"frames":{"decoded":96,"inferred":94,"encoded":0},"final":false}
+{"type":"progress","command":"benchmark","elapsed_ms":14892,"frames":{"decoded":1421,"inferred":1421,"encoded":0},"final":true}
+```
+
 ## WSL2 + CUDA + ONNX Runtime TensorRT EP
 
 RAVE can run under WSL2 with NVIDIA GPU acceleration. ONNX Runtime is linked statically in this build, and TensorRT EP provider plugins are loaded dynamically. TensorRT EP requires the provider bridge symbol `Provider_GetHost` from `libonnxruntime_providers_shared.so`.

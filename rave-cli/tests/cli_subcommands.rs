@@ -292,6 +292,53 @@ fn benchmark_dry_run_accepts_jsonl_progress_flag() {
 }
 
 #[test]
+fn benchmark_dry_run_json_mode_is_clean_stdout_even_with_progress_flags() {
+    let dir = unique_temp_dir("benchmark_json_stdout_clean");
+    let input = dir.join("input.265");
+    let model = dir.join("model.onnx");
+    let json_out = dir.join("bench.json");
+    write_dummy_file(&input);
+    write_dummy_file(&model);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rave"))
+        .args([
+            "benchmark",
+            "--input",
+            input.to_str().expect("utf8 input"),
+            "--model",
+            model.to_str().expect("utf8 model"),
+            "--json",
+            "--json-out",
+            json_out.to_str().expect("utf8 json out"),
+            "--progress",
+            "jsonl",
+            "--jsonl",
+            "--dry-run",
+        ])
+        .output()
+        .expect("run rave benchmark with json + progress flags");
+
+    assert!(
+        output.status.success(),
+        "benchmark dry-run with json/progress flags failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout_value: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|e| panic!("benchmark stdout is not clean JSON: {e}"));
+    assert_eq!(
+        stdout_value.get("command").and_then(|v| v.as_str()),
+        Some("benchmark")
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("\"type\":\"progress\"") && !stderr.contains("progress: command="),
+        "dry-run should not emit progress records, got stderr: {stderr}"
+    );
+}
+
+#[test]
 fn upscale_dry_run_json_emits_valid_json_shape() {
     let dir = unique_temp_dir("upscale_json");
     let input = dir.join("input.265");
@@ -340,5 +387,52 @@ fn upscale_dry_run_json_emits_valid_json_shape() {
     assert!(
         value.get("height").and_then(|v| v.as_u64()).is_some(),
         "missing height field"
+    );
+}
+
+#[test]
+fn upscale_dry_run_json_mode_is_clean_stdout_even_with_progress_flags() {
+    let dir = unique_temp_dir("upscale_json_stdout_clean");
+    let input = dir.join("input.265");
+    let model = dir.join("model.onnx");
+    let output_path = dir.join("output.265");
+    write_dummy_file(&input);
+    write_dummy_file(&model);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_rave"))
+        .args([
+            "upscale",
+            "--input",
+            input.to_str().expect("utf8 input"),
+            "--output",
+            output_path.to_str().expect("utf8 output"),
+            "--model",
+            model.to_str().expect("utf8 model"),
+            "--json",
+            "--progress",
+            "jsonl",
+            "--jsonl",
+            "--dry-run",
+        ])
+        .output()
+        .expect("run rave upscale with json + progress flags");
+
+    assert!(
+        output.status.success(),
+        "upscale dry-run with json/progress flags failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout_value: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|e| panic!("upscale stdout is not clean JSON: {e}"));
+    assert_eq!(
+        stdout_value.get("command").and_then(|v| v.as_str()),
+        Some("upscale")
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("\"type\":\"progress\"") && !stderr.contains("progress: command="),
+        "dry-run should not emit progress records, got stderr: {stderr}"
     );
 }
