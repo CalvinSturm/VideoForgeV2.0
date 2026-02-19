@@ -1,3 +1,5 @@
-pub mod tensorrt {
-    pub use rave_engine::backends::tensorrt::*;
-}
+//! TensorRT backend implementation.
+
+pub mod tensorrt;
+
+pub use tensorrt::{BatchConfig, TensorRtBackend};

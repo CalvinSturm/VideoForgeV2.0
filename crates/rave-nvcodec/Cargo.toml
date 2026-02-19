@@ -1,11 +1,16 @@
 [package]
 name = "rave-nvcodec"
-version = "0.1.0"
-edition = "2024"
-publish = false
-
-[lib]
-path = "src/lib.rs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "RAVE NVDEC/NVENC hardware codec wrappers."
+build = "build.rs"
 
 [dependencies]
-rave-engine = { path = "../../legacy/engine-v2" }
+rave-core = { workspace = true }
+cudarc = { workspace = true }
+tracing = { workspace = true }
+
+[build-dependencies]

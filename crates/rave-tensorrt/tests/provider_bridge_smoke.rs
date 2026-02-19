@@ -70,22 +70,30 @@ fn dlopen_path(path: &Path, flags: i32) -> Result<(), String> {
 }
 
 #[test]
-#[ignore = "requires ORT TensorRT provider libs present on host"]
 fn providers_shared_then_tensorrt_dlopen_smoke() {
-    let shared = provider_candidates("libonnxruntime_providers_shared.so")
+    let Some(shared) = provider_candidates("libonnxruntime_providers_shared.so")
         .into_iter()
-        .next()
-        .expect("providers_shared not found");
-    let trt = provider_candidates("libonnxruntime_providers_tensorrt.so")
+        .find(|p| p.is_file())
+    else {
+        eprintln!("skipping: providers_shared not found");
+        return;
+    };
+    let Some(trt) = provider_candidates("libonnxruntime_providers_tensorrt.so")
         .into_iter()
-        .next()
-        .expect("providers_tensorrt not found");
+        .find(|p| p.is_file())
+    else {
+        eprintln!("skipping: providers_tensorrt not found");
+        return;
+    };
     let out = Command::new("nm")
         .arg("-D")
         .arg("--defined-only")
         .arg(&shared)
-        .output()
-        .expect("run nm");
+        .output();
+    let Ok(out) = out else {
+        eprintln!("skipping: nm not available");
+        return;
+    };
     assert!(out.status.success(), "nm failed for {}", shared.display());
     let nm_text = String::from_utf8_lossy(&out.stdout);
     assert!(
@@ -98,8 +106,11 @@ fn providers_shared_then_tensorrt_dlopen_smoke() {
         .arg("ldd")
         .arg("-r")
         .arg(&trt)
-        .output()
-        .expect("run ldd -r");
+        .output();
+    let Ok(out) = out else {
+        eprintln!("skipping: ldd not available");
+        return;
+    };
     assert!(out.status.success(), "ldd -r failed for {}", trt.display());
     let text = format!(
         "{}\n{}",
@@ -114,13 +125,22 @@ fn providers_shared_then_tensorrt_dlopen_smoke() {
 }
 
 #[test]
-#[ignore = "requires model + full TensorRT runtime"]
 fn ort_tensorrt_ep_registration_smoke() {
-    let model = env::var("RAVE_TEST_ONNX_MODEL").expect("set RAVE_TEST_ONNX_MODEL");
-    let shared = provider_candidates("libonnxruntime_providers_shared.so")
+    let Ok(model) = env::var("RAVE_TEST_ONNX_MODEL") else {
+        eprintln!("skipping: RAVE_TEST_ONNX_MODEL not set");
+        return;
+    };
+    if !Path::new(&model).is_file() {
+        eprintln!("skipping: RAVE_TEST_ONNX_MODEL does not exist: {model}");
+        return;
+    }
+    let Some(shared) = provider_candidates("libonnxruntime_providers_shared.so")
         .into_iter()
-        .next()
-        .expect("providers_shared not found");
+        .find(|p| p.is_file())
+    else {
+        eprintln!("skipping: providers_shared not found");
+        return;
+    };
 
     dlopen_path(&shared, RTLD_NOW | RTLD_GLOBAL).expect("preload providers_shared");
 

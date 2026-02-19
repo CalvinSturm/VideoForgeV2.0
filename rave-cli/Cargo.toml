@@ -1,24 +1,32 @@
 [package]
 name = "rave-cli"
-version = "0.1.0"
-edition = "2024"
-publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "RAVE CLI — GPU-native video super-resolution engine."
 
 [[bin]]
 name = "rave"
 path = "src/main.rs"
+doc = false
+
+[features]
+default = []
+debug-alloc = ["rave-core/debug-alloc", "rave-pipeline/debug-alloc", "rave-tensorrt/debug-alloc"]
 
 [dependencies]
-clap = { version = "4", features = ["derive"] }
-rave-core = { path = "../crates/rave-core" }
-rave-cuda = { path = "../crates/rave-cuda" }
-rave-ffmpeg = { path = "../crates/rave-ffmpeg" }
-rave-nvcodec = { path = "../crates/rave-nvcodec" }
-rave-pipeline = { path = "../crates/rave-pipeline" }
-rave-tensorrt = { path = "../crates/rave-tensorrt" }
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "signal", "time"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rave-core = { workspace = true }
+rave-cuda = { workspace = true }
+rave-tensorrt = { workspace = true }
+rave-nvcodec = { workspace = true }
+rave-ffmpeg = { workspace = true }
+rave-pipeline = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
 serde_json = "1"

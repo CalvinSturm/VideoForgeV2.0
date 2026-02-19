@@ -1,11 +1,5 @@
-pub mod nvdec {
-    pub use rave_engine::codecs::nvdec::*;
-}
+//! NVIDIA codec wrappers for decode/encode.
 
-pub mod nvenc {
-    pub use rave_engine::codecs::nvenc::*;
-}
-
-pub mod sys {
-    pub use rave_engine::codecs::sys::*;
-}
+pub mod nvdec;
+pub mod nvenc;
+pub mod sys;

@@ -1,11 +1,21 @@
 [package]
 name = "rave-pipeline"
-version = "0.1.0"
-edition = "2024"
-publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "RAVE pipeline orchestration — decode→preprocess→infer→encode."
 
-[lib]
-path = "src/lib.rs"
+[features]
+default = []
+debug-alloc = ["rave-core/debug-alloc"]
 
 [dependencies]
-rave-engine = { path = "../../legacy/engine-v2" }
+rave-core = { workspace = true }
+rave-cuda = { workspace = true }
+rave-tensorrt = { workspace = true }
+cudarc = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }

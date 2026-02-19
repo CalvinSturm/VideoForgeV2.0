@@ -19,8 +19,12 @@ Do not rely on unrelated software installs (for example Ollama) to provide `libc
 ## Recommended runtime env
 
 ```bash
-export LD_LIBRARY_PATH=/usr/lib/wsl/lib:/usr/local/cuda-12/targets/x86_64-linux/lib:${LD_LIBRARY_PATH}
+source scripts/wsl/env.sh
 ```
+
+`scripts/wsl/env.sh` sets:
+- `LD_LIBRARY_PATH=/usr/lib/wsl/lib:/usr/local/cuda-12/targets/x86_64-linux/lib:...`
+- `RUSTFLAGS` with `-Lnative=/usr/lib/wsl/lib` (for `cargo test/build` linker resolution on WSL)
 
 `rave-tensorrt` also preloads CUDA runtime libs from `/usr/local/cuda-12/targets/x86_64-linux/lib` (and `/usr/local/cuda/lib64`) before ORT TensorRT EP registration.
 
@@ -63,6 +67,7 @@ scripts/repro_wsl.sh \
 ## Direct CLI command (new syntax)
 
 ```bash
+source scripts/wsl/env.sh
 cargo run -p rave-cli --bin rave --locked -- \
   upscale \
   --input legacy/engine-v2/test_videos/Input.mp4 \
@@ -88,7 +93,7 @@ set -euo pipefail
 IN=legacy/engine-v2/test_videos/Input.mp4
 OUT=legacy/engine-v2/test_videos/out_10line.mp4
 MODEL=legacy/engine-v2/models/4xNomos2_hq_dat2_fp32.onnx
-export LD_LIBRARY_PATH=/usr/lib/wsl/lib:/usr/local/cuda-12/targets/x86_64-linux/lib:${LD_LIBRARY_PATH:-}
+source scripts/wsl/env.sh
 cargo run -p rave-cli --bin rave --locked -- upscale \
   --input "$IN" --output "$OUT" --model "$MODEL" \
   --precision fp32 --device 0
@@ -146,5 +151,5 @@ scripts/run_cuda_probe.sh
 If logs show `/usr/lib/wsl/drivers/.../libcuda.so.1.1` during failure, prepend:
 
 ```bash
-LD_LIBRARY_PATH=/usr/lib/wsl/lib:/usr/local/cuda-12/targets/x86_64-linux/lib:${LD_LIBRARY_PATH:-}
+source scripts/wsl/env.sh
 ```

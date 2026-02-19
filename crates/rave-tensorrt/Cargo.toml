@@ -1,11 +1,21 @@
 [package]
 name = "rave-tensorrt"
-version = "0.1.0"
-edition = "2024"
-publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "RAVE TensorRT inference backend."
 
-[lib]
-path = "src/lib.rs"
+[features]
+default = []
+debug-alloc = ["rave-core/debug-alloc"]
 
 [dependencies]
-rave-engine = { path = "../../legacy/engine-v2" }
+rave-core = { workspace = true }
+ort = { workspace = true }
+cudarc = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+half = { workspace = true }

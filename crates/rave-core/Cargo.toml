@@ -1,11 +1,21 @@
 [package]
 name = "rave-core"
-version = "0.1.0"
-edition = "2024"
-publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "RAVE core types, traits, context, and error hierarchy."
 
-[lib]
-path = "src/lib.rs"
+[features]
+default = []
+debug-alloc = []
 
 [dependencies]
-rave-engine = { path = "../../legacy/engine-v2" }
+cudarc = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+half = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }
+ort = { workspace = true }
