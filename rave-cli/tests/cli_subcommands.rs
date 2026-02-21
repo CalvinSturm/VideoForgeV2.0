@@ -47,6 +47,10 @@ fn help_lists_subcommands() {
     );
     assert!(stdout.contains("probe"), "missing probe in help output");
     assert!(stdout.contains("devices"), "missing devices in help output");
+    assert!(
+        stdout.contains("validate"),
+        "missing validate in help output"
+    );
 }
 
 #[test]
@@ -118,6 +122,53 @@ fn devices_help_lists_json() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("--json"), "missing --json in devices help");
+}
+
+#[test]
+fn validate_help_lists_profile_and_graph_flags() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rave"))
+        .args(["validate", "--help"])
+        .output()
+        .expect("run rave validate --help");
+
+    assert!(
+        output.status.success(),
+        "validate --help failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("--profile"),
+        "missing --profile in validate help"
+    );
+    assert!(
+        stdout.contains("--graph"),
+        "missing --graph in validate help"
+    );
+}
+
+#[test]
+fn validate_json_without_input_is_single_schema_object() {
+    let output = Command::new(env!("CARGO_BIN_EXE_rave"))
+        .args(["validate", "--json"])
+        .output()
+        .expect("run rave validate --json");
+
+    assert!(
+        output.status.success(),
+        "validate --json failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|e| panic!("validate --json stdout is not JSON: {e}"));
+    assert_schema_version(&value);
+    assert_eq!(
+        value.get("command").and_then(|v| v.as_str()),
+        Some("validate"),
+        "missing command=validate field"
+    );
 }
 
 #[test]

@@ -30,6 +30,10 @@ use rave_ffmpeg::probe_container;
 use rave_nvcodec::nvdec::NvDecoder;
 use rave_nvcodec::nvenc::{NvEncConfig, NvEncoder};
 use rave_pipeline::pipeline::{PipelineConfig, PipelineMetrics, UpscalePipeline};
+use rave_pipeline::{
+    BatchConfig as GraphBatchConfig, EnhanceConfig, PipelineReport, PrecisionPolicyConfig,
+    ProfilePreset, RunContract, StageConfig, StageGraph, StageId,
+};
 use rave_tensorrt::tensorrt::TensorRtBackend;
 
 #[cfg(target_os = "linux")]
@@ -60,6 +64,8 @@ enum Commands {
     Upscale(UpscaleArgs),
     /// Run benchmark and emit summary.
     Benchmark(BenchmarkArgs),
+    /// Run strict validation harness (graph + profile + contract checks).
+    Validate(ValidateArgs),
     /// List visible CUDA devices and memory capacity.
     Devices(DevicesArgs),
     /// Probe CUDA context initialization and print basic status.
@@ -75,6 +81,14 @@ struct SharedVideoArgs {
     /// ONNX model path.
     #[arg(short = 'm', long = "model")]
     model: PathBuf,
+
+    /// Runtime profile preset.
+    #[arg(long = "profile", value_enum, default_value_t = ProfileArg::Dev)]
+    profile: ProfileArg,
+
+    /// Optional JSON stage graph path.
+    #[arg(long = "graph")]
+    graph: Option<PathBuf>,
 
     /// Model precision: fp32 or fp16.
     #[arg(short = 'p', long = "precision")]
@@ -194,6 +208,65 @@ struct BenchmarkArgs {
 }
 
 #[derive(Args, Debug, Clone)]
+struct ValidateArgs {
+    /// Input video file.
+    #[arg(short = 'i', long = "input")]
+    input: Option<PathBuf>,
+
+    /// ONNX model path (used when `--graph` is omitted).
+    #[arg(short = 'm', long = "model")]
+    model: Option<PathBuf>,
+
+    /// Optional output path used for validation runs.
+    #[arg(short = 'o', long = "output")]
+    output: Option<PathBuf>,
+
+    /// Runtime profile preset.
+    #[arg(long = "profile", value_enum, default_value_t = ProfileArg::ProductionStrict)]
+    profile: ProfileArg,
+
+    /// Optional JSON stage graph path.
+    #[arg(long = "graph")]
+    graph: Option<PathBuf>,
+
+    /// CUDA device ordinal.
+    #[arg(short = 'd', long = "device")]
+    device: Option<u32>,
+
+    /// Determinism run count for strict comparison.
+    #[arg(long = "determinism-runs", default_value_t = 2)]
+    determinism_runs: u32,
+
+    /// Number of per-frame canonical hashes to collect.
+    #[arg(long = "determinism-samples", default_value_t = 0)]
+    determinism_samples: usize,
+
+    /// Optional max average inference latency threshold in microseconds.
+    #[arg(long = "max-infer-us")]
+    max_infer_us: Option<f64>,
+
+    /// Optional max peak VRAM threshold in MiB.
+    #[arg(long = "max-vram-mb")]
+    max_vram_mb: Option<usize>,
+
+    /// Skip failures when runtime requirements are unavailable.
+    #[arg(long = "best-effort", default_value_t = true)]
+    best_effort: bool,
+
+    /// Emit structured JSON output to stdout.
+    #[arg(long = "json", default_value_t = false)]
+    json: bool,
+
+    /// Progress output mode to stderr: auto (TTY only), off, human, jsonl.
+    #[arg(long = "progress", value_enum, default_value_t = ProgressArg::Auto)]
+    progress: ProgressArg,
+
+    /// Emit progress as JSONL records to stderr.
+    #[arg(long = "jsonl", default_value_t = false)]
+    jsonl: bool,
+}
+
+#[derive(Args, Debug, Clone)]
 struct ProbeArgs {
     /// CUDA device ordinal.
     #[arg(short = 'd', long = "device")]
@@ -221,6 +294,14 @@ enum ProgressArg {
     Off,
     Human,
     Jsonl,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+enum ProfileArg {
+    #[value(name = "dev")]
+    Dev,
+    #[value(name = "production_strict")]
+    ProductionStrict,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -397,6 +478,7 @@ fn main() {
         Commands::Devices(args) if args.json => Some("devices"),
         Commands::Upscale(args) if args.json => Some("upscale"),
         Commands::Benchmark(args) if args.json => Some("benchmark"),
+        Commands::Validate(args) if args.json => Some("validate"),
         _ => None,
     };
 
@@ -410,6 +492,10 @@ fn main() {
         Commands::Benchmark(args) => {
             let rt = build_runtime();
             rt.block_on(run_benchmark(args))
+        }
+        Commands::Validate(args) => {
+            let rt = build_runtime();
+            rt.block_on(run_validate(args))
         }
     };
 
@@ -788,6 +874,10 @@ async fn run_upscale(args: UpscaleArgs) -> Result<()> {
         return Ok(());
     }
 
+    if args.shared.graph.is_some() || args.shared.profile != ProfileArg::Dev {
+        return run_upscale_with_graph(args).await;
+    }
+
     let wall_start = Instant::now();
     let setup = prepare_runtime(&args.shared, resolved).await?;
     let decoder = create_decoder(&setup, &args.shared.input)?;
@@ -809,7 +899,7 @@ async fn run_upscale(args: UpscaleArgs) -> Result<()> {
             encoder_nv12_pitch: setup.nv12_pitch,
             model_precision: setup.precision,
             enable_profiler: true,
-            strict_no_host_copies: false,
+            strict_no_host_copies: matches!(args.shared.profile, ProfileArg::ProductionStrict),
         },
     );
     let progress_mode = resolve_progress_mode(args.progress, args.jsonl);
@@ -864,6 +954,12 @@ async fn run_upscale(args: UpscaleArgs) -> Result<()> {
 
 async fn run_benchmark(args: BenchmarkArgs) -> Result<()> {
     ensure_required_paths(&args.shared)?;
+
+    if args.shared.graph.is_some() {
+        return Err(EngineError::Pipeline(
+            "benchmark does not support --graph yet; use `rave validate` or `rave upscale --profile ... --graph ...`".into(),
+        ));
+    }
 
     let resolved = resolve_input(&args.shared)?;
     let emit_json_stdout = args.json;
@@ -930,6 +1026,403 @@ async fn run_benchmark(args: BenchmarkArgs) -> Result<()> {
     shutdown_result?;
 
     emit_benchmark_output(&summary, args.json_out.as_deref(), emit_json_stdout)?;
+    Ok(())
+}
+
+async fn run_upscale_with_graph(args: UpscaleArgs) -> Result<()> {
+    let wall_start = Instant::now();
+    let resolved = resolve_input(&args.shared)?;
+    let profile = profile_to_preset(args.shared.profile);
+    let graph = load_stage_graph(
+        args.shared.graph.as_deref(),
+        Some(&args.shared.model),
+        args.shared.precision.as_deref(),
+    )?;
+
+    let device = args.shared.device.unwrap_or(0) as usize;
+    let ctx = GpuContext::new(device)?;
+    if let Some(vram_limit_mib) = args.shared.vram_limit
+        && vram_limit_mib > 0
+    {
+        ctx.set_vram_limit(vram_limit_mib * 1024 * 1024);
+    }
+    let kernels = Arc::new(PreprocessKernels::compile(ctx.device())?);
+
+    let pipeline = UpscalePipeline::new(
+        ctx.clone(),
+        kernels,
+        PipelineConfig {
+            decoded_capacity: args.shared.decode_cap.unwrap_or(4),
+            preprocessed_capacity: args.shared.preprocess_cap.unwrap_or(2),
+            upscaled_capacity: args.shared.upscale_cap.unwrap_or(4),
+            encoder_nv12_pitch: 256,
+            model_precision: parse_precision(args.shared.precision.as_deref().unwrap_or("fp32"))?,
+            enable_profiler: true,
+            strict_no_host_copies: false,
+        },
+    );
+
+    let mut contract = RunContract::for_profile(profile);
+    contract.requested_device = device as u32;
+    let report = pipeline
+        .run_graph(&args.shared.input, &args.output, graph, profile, contract)
+        .await?;
+
+    let elapsed = wall_start.elapsed();
+    if args.json {
+        println!(
+            "{}",
+            upscale_json(
+                false,
+                &args.shared.input,
+                &args.output,
+                &args.shared.model,
+                resolved.codec,
+                resolved.width,
+                resolved.height,
+                resolved.fps_num,
+                resolved.fps_den,
+                elapsed.as_secs_f64() * 1000.0,
+                report.vram_current_bytes / (1024 * 1024),
+                report.vram_peak_bytes / (1024 * 1024),
+            )
+        );
+    } else {
+        println!(
+            "upscale: ok output={} elapsed_s={:.3} vram_peak_mb={} profile={}",
+            args.output.display(),
+            elapsed.as_secs_f64(),
+            report.vram_peak_bytes / (1024 * 1024),
+            profile_label(args.shared.profile)
+        );
+    }
+
+    Ok(())
+}
+
+#[derive(Debug)]
+struct ValidateSummary {
+    ok: bool,
+    skipped: bool,
+    profile: ProfileArg,
+    runs: u32,
+    determinism_equal: Option<bool>,
+    max_infer_us: f64,
+    peak_vram_mb: usize,
+    frames_decoded: u64,
+    frames_encoded: u64,
+    warnings: Vec<String>,
+}
+
+impl ValidateSummary {
+    fn to_human(&self) -> String {
+        if self.skipped {
+            return format!(
+                "validate: skipped profile={} warnings={}",
+                profile_label(self.profile),
+                self.warnings.join(" | ")
+            );
+        }
+
+        let determinism = self
+            .determinism_equal
+            .map(|v| if v { "pass" } else { "fail" })
+            .unwrap_or("n/a");
+        format!(
+            "validate: ok={} profile={} runs={} determinism={} max_infer_us={:.3} peak_vram_mb={} frames_decoded={} frames_encoded={} warnings={}",
+            self.ok,
+            profile_label(self.profile),
+            self.runs,
+            determinism,
+            self.max_infer_us,
+            self.peak_vram_mb,
+            self.frames_decoded,
+            self.frames_encoded,
+            self.warnings.join(" | ")
+        )
+    }
+
+    fn to_json(&self) -> String {
+        let warnings = self
+            .warnings
+            .iter()
+            .map(|v| json_string(v))
+            .collect::<Vec<_>>()
+            .join(",");
+        let determinism = self
+            .determinism_equal
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "null".to_string());
+        format!(
+            "{{\"schema_version\":{},\"command\":\"validate\",\"ok\":{},\"skipped\":{},\"profile\":{},\"runs\":{},\"determinism_equal\":{},\"max_infer_us\":{},\"peak_vram_mb\":{},\"frames\":{{\"decoded\":{},\"encoded\":{}}},\"warnings\":[{}]}}",
+            JSON_SCHEMA_VERSION,
+            self.ok,
+            self.skipped,
+            json_string(profile_label(self.profile)),
+            self.runs,
+            determinism,
+            json_number(self.max_infer_us),
+            self.peak_vram_mb,
+            self.frames_decoded,
+            self.frames_encoded,
+            warnings
+        )
+    }
+}
+
+async fn run_validate(args: ValidateArgs) -> Result<()> {
+    let progress_mode = resolve_progress_mode(args.progress, args.jsonl);
+    emit_progress_line(
+        "validate",
+        progress_mode,
+        Duration::from_millis(0),
+        ProgressSnapshot {
+            decoded: 0,
+            inferred: 0,
+            encoded: 0,
+        },
+        false,
+    );
+
+    let profile = profile_to_preset(args.profile);
+    let Some(input) = args.input.as_ref() else {
+        let summary = ValidateSummary {
+            ok: true,
+            skipped: true,
+            profile: args.profile,
+            runs: 0,
+            determinism_equal: None,
+            max_infer_us: 0.0,
+            peak_vram_mb: 0,
+            frames_decoded: 0,
+            frames_encoded: 0,
+            warnings: vec!["no input provided; validation skipped".into()],
+        };
+        if args.json {
+            println!("{}", summary.to_json());
+        } else {
+            println!("{}", summary.to_human());
+        }
+        emit_progress_line(
+            "validate",
+            progress_mode,
+            Duration::from_millis(0),
+            ProgressSnapshot {
+                decoded: 0,
+                inferred: 0,
+                encoded: 0,
+            },
+            true,
+        );
+        return Ok(());
+    };
+
+    let graph = load_stage_graph(args.graph.as_deref(), args.model.as_ref(), None)?;
+    let device = args.device.unwrap_or(0) as usize;
+    let output_path = args
+        .output
+        .clone()
+        .unwrap_or_else(|| std::env::temp_dir().join("rave_validate_out.mp4"));
+
+    let ctx = match GpuContext::new(device) {
+        Ok(ctx) => ctx,
+        Err(err) if args.best_effort => {
+            let summary = ValidateSummary {
+                ok: true,
+                skipped: true,
+                profile: args.profile,
+                runs: 0,
+                determinism_equal: None,
+                max_infer_us: 0.0,
+                peak_vram_mb: 0,
+                frames_decoded: 0,
+                frames_encoded: 0,
+                warnings: vec![format!("runtime unavailable: {err}")],
+            };
+            if args.json {
+                println!("{}", summary.to_json());
+            } else {
+                println!("{}", summary.to_human());
+            }
+            emit_progress_line(
+                "validate",
+                progress_mode,
+                Duration::from_millis(0),
+                ProgressSnapshot {
+                    decoded: 0,
+                    inferred: 0,
+                    encoded: 0,
+                },
+                true,
+            );
+            return Ok(());
+        }
+        Err(err) => return Err(err),
+    };
+    let kernels = Arc::new(PreprocessKernels::compile(ctx.device())?);
+    let pipeline = UpscalePipeline::new(
+        ctx,
+        kernels,
+        PipelineConfig {
+            decoded_capacity: 4,
+            preprocessed_capacity: 2,
+            upscaled_capacity: 4,
+            encoder_nv12_pitch: 256,
+            model_precision: ModelPrecision::F16,
+            enable_profiler: true,
+            strict_no_host_copies: false,
+        },
+    );
+
+    let mut contract = RunContract::for_profile(profile);
+    contract.requested_device = device as u32;
+    contract.determinism_hash_frames = args.determinism_samples;
+    let runs = if matches!(args.profile, ProfileArg::ProductionStrict) {
+        args.determinism_runs.max(1)
+    } else {
+        1
+    };
+
+    let mut reports = Vec::<PipelineReport>::new();
+    for idx in 0..runs {
+        let run_output = if runs > 1 {
+            let stem = output_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("rave_validate");
+            let ext = output_path
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("mp4");
+            output_path.with_file_name(format!("{stem}_run{idx}.{ext}"))
+        } else {
+            output_path.clone()
+        };
+
+        let report = match pipeline
+            .run_graph(input, &run_output, graph.clone(), profile, contract.clone())
+            .await
+        {
+            Ok(report) => report,
+            Err(err) if args.best_effort => {
+                let summary = ValidateSummary {
+                    ok: true,
+                    skipped: true,
+                    profile: args.profile,
+                    runs: idx,
+                    determinism_equal: None,
+                    max_infer_us: 0.0,
+                    peak_vram_mb: 0,
+                    frames_decoded: 0,
+                    frames_encoded: 0,
+                    warnings: vec![format!("validation execution skipped: {err}")],
+                };
+                if args.json {
+                    println!("{}", summary.to_json());
+                } else {
+                    println!("{}", summary.to_human());
+                }
+                emit_progress_line(
+                    "validate",
+                    progress_mode,
+                    Duration::from_millis(0),
+                    ProgressSnapshot {
+                        decoded: 0,
+                        inferred: 0,
+                        encoded: 0,
+                    },
+                    true,
+                );
+                return Ok(());
+            }
+            Err(err) => return Err(err),
+        };
+        reports.push(report);
+    }
+
+    let first = reports
+        .first()
+        .ok_or_else(|| EngineError::Pipeline("validate produced no reports".into()))?;
+    let infer_avg = if first.frames_encoded > 0 {
+        first.stage_timing.infer_us as f64 / first.frames_encoded as f64
+    } else {
+        0.0
+    };
+    let peak_vram_mb = first.vram_peak_bytes / (1024 * 1024);
+
+    if let Some(limit) = args.max_infer_us
+        && infer_avg > limit
+    {
+        return Err(EngineError::InvariantViolation(format!(
+            "validate threshold failed: infer_avg_us={infer_avg:.3} > {limit:.3}"
+        )));
+    }
+    if let Some(limit) = args.max_vram_mb
+        && peak_vram_mb > limit
+    {
+        return Err(EngineError::InvariantViolation(format!(
+            "validate threshold failed: peak_vram_mb={peak_vram_mb} > {limit}"
+        )));
+    }
+    if first.frames_decoded != first.frames_encoded {
+        return Err(EngineError::InvariantViolation(format!(
+            "validate failed: frame count mismatch decoded={} encoded={}",
+            first.frames_decoded, first.frames_encoded
+        )));
+    }
+
+    let determinism_equal = if runs > 1 && contract.deterministic_output {
+        let baseline = &reports[0].stage_checksums;
+        Some(
+            reports
+                .iter()
+                .skip(1)
+                .all(|report| report.stage_checksums == *baseline),
+        )
+    } else {
+        None
+    };
+    if determinism_equal == Some(false) {
+        return Err(EngineError::InvariantViolation(
+            "validate determinism failed: stage checksums differ across runs".into(),
+        ));
+    }
+
+    let summary = ValidateSummary {
+        ok: true,
+        skipped: false,
+        profile: args.profile,
+        runs,
+        determinism_equal,
+        max_infer_us: infer_avg,
+        peak_vram_mb,
+        frames_decoded: first.frames_decoded,
+        frames_encoded: first.frames_encoded,
+        warnings: reports
+            .iter()
+            .flat_map(|report| report.audit.iter())
+            .filter(|check| matches!(check.status, rave_pipeline::AuditStatus::Warn))
+            .map(|check| format!("{}: {}", check.name, check.detail))
+            .collect(),
+    };
+
+    if args.json {
+        println!("{}", summary.to_json());
+    } else {
+        println!("{}", summary.to_human());
+    }
+
+    emit_progress_line(
+        "validate",
+        progress_mode,
+        Duration::from_millis(0),
+        ProgressSnapshot {
+            decoded: first.frames_decoded,
+            inferred: first.frames_encoded,
+            encoded: first.frames_encoded,
+        },
+        true,
+    );
     Ok(())
 }
 
@@ -1583,6 +2076,63 @@ fn parse_precision(s: &str) -> Result<ModelPrecision> {
             "Unknown precision '{other}'. Use fp32 or fp16."
         ))),
     }
+}
+
+fn parse_precision_policy(s: &str) -> Result<PrecisionPolicyConfig> {
+    match s.to_ascii_lowercase().as_str() {
+        "fp32" | "f32" | "float32" => Ok(PrecisionPolicyConfig::Fp32),
+        "fp16" | "f16" | "float16" | "half" => Ok(PrecisionPolicyConfig::Fp16),
+        other => Err(EngineError::Pipeline(format!(
+            "Unknown precision policy '{other}'. Use fp32 or fp16."
+        ))),
+    }
+}
+
+fn profile_to_preset(profile: ProfileArg) -> ProfilePreset {
+    match profile {
+        ProfileArg::Dev => ProfilePreset::Dev,
+        ProfileArg::ProductionStrict => ProfilePreset::ProductionStrict,
+    }
+}
+
+fn profile_label(profile: ProfileArg) -> &'static str {
+    match profile {
+        ProfileArg::Dev => "dev",
+        ProfileArg::ProductionStrict => "production_strict",
+    }
+}
+
+fn load_stage_graph(
+    graph_path: Option<&Path>,
+    model: Option<&PathBuf>,
+    precision: Option<&str>,
+) -> Result<StageGraph> {
+    let graph = if let Some(path) = graph_path {
+        StageGraph::from_json_file(path)?
+    } else {
+        let model_path = model
+            .ok_or_else(|| {
+                EngineError::Pipeline(
+                    "Graph not provided and model path missing for default Enhance stage".into(),
+                )
+            })?
+            .clone();
+
+        StageGraph {
+            stages: vec![StageConfig::Enhance {
+                id: StageId(1),
+                config: EnhanceConfig {
+                    model_path,
+                    precision_policy: parse_precision_policy(precision.unwrap_or("fp16"))?,
+                    batch_config: GraphBatchConfig::default(),
+                    scale: 2,
+                },
+            }],
+        }
+    };
+
+    graph.validate()?;
+    Ok(graph)
 }
 
 fn parse_codec(s: &str) -> Result<cudaVideoCodec> {
