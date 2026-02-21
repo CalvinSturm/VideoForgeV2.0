@@ -42,7 +42,7 @@ impl FfmpegMuxer {
         let path_str = path
             .to_str()
             .ok_or_else(|| EngineError::Mux("Non-UTF8 path".into()))?;
-        let c_path = to_cstring(path_str).map_err(|e| EngineError::Mux(format!("{e}")))?;
+        let c_path = to_cstring(path_str).map_err(EngineError::Mux)?;
 
         // ── Create output format context ──
         let mut fmt_ctx: *mut AVFormatContext = ptr::null_mut();
@@ -84,7 +84,7 @@ impl FfmpegMuxer {
             let ret = unsafe { avio_open(&mut (*fmt_ctx).pb, c_path.as_ptr(), AVIO_FLAG_WRITE) };
             if ret < 0 {
                 unsafe { avformat_free_context(fmt_ctx) };
-                check_ffmpeg(ret, "avio_open").map_err(|e| EngineError::Mux(format!("{e}")))?;
+                check_ffmpeg(ret, "avio_open").map_err(|e| EngineError::Mux(e.to_string()))?;
             }
         }
 
@@ -129,7 +129,7 @@ impl FfmpegMuxer {
         }
 
         let ret = unsafe { avformat_write_header(self.fmt_ctx, ptr::null_mut()) };
-        check_ffmpeg(ret, "avformat_write_header").map_err(|e| EngineError::Mux(format!("{e}")))?;
+        check_ffmpeg(ret, "avformat_write_header").map_err(|e| EngineError::Mux(e.to_string()))?;
 
         // Capture the actual time_base after muxer initialization
         // (the muxer may adjust it).
@@ -154,7 +154,7 @@ impl BitstreamSink for FfmpegMuxer {
             // Copy data into the AVPacket.
             let ret = av_new_packet(self.pkt, data.len() as i32);
             if ret < 0 {
-                check_ffmpeg(ret, "av_new_packet").map_err(|e| EngineError::Mux(format!("{e}")))?;
+                check_ffmpeg(ret, "av_new_packet").map_err(|e| EngineError::Mux(e.to_string()))?;
             }
             ptr::copy_nonoverlapping(data.as_ptr(), (*self.pkt).data, data.len());
 
@@ -174,7 +174,7 @@ impl BitstreamSink for FfmpegMuxer {
             // av_interleaved_write_frame takes ownership — unrefs internally.
             if ret < 0 {
                 check_ffmpeg(ret, "av_interleaved_write_frame")
-                    .map_err(|e| EngineError::Mux(format!("{e}")))?;
+                    .map_err(|e| EngineError::Mux(e.to_string()))?;
             }
         }
 
@@ -193,7 +193,7 @@ impl BitstreamSink for FfmpegMuxer {
         }
 
         let ret = unsafe { av_write_trailer(self.fmt_ctx) };
-        check_ffmpeg(ret, "av_write_trailer").map_err(|e| EngineError::Mux(format!("{e}")))?;
+        check_ffmpeg(ret, "av_write_trailer").map_err(|e| EngineError::Mux(e.to_string()))?;
 
         tracing::info!(
             packets = self.packet_counter,

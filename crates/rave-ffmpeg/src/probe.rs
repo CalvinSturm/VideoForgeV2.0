@@ -52,7 +52,7 @@ pub fn probe_container(path: &std::path::Path) -> Result<ContainerMetadata> {
     let path_str = path
         .to_str()
         .ok_or_else(|| EngineError::Probe("Non-UTF8 path".into()))?;
-    let c_path = to_cstring(path_str).map_err(|e| EngineError::Probe(format!("{e}")))?;
+    let c_path = to_cstring(path_str).map_err(EngineError::Probe)?;
 
     let mut fmt_ctx: *mut AVFormatContext = ptr::null_mut();
 
@@ -60,7 +60,7 @@ pub fn probe_container(path: &std::path::Path) -> Result<ContainerMetadata> {
     // SAFETY: c_path is a valid null-terminated C string. fmt_ctx is an output.
     let ret =
         unsafe { avformat_open_input(&mut fmt_ctx, c_path.as_ptr(), ptr::null(), ptr::null_mut()) };
-    check_ffmpeg(ret, "avformat_open_input").map_err(|e| EngineError::Probe(format!("{e}")))?;
+    check_ffmpeg(ret, "avformat_open_input").map_err(|e| EngineError::Probe(e.to_string()))?;
 
     let guard = FormatGuard { ctx: fmt_ctx };
 
@@ -68,7 +68,7 @@ pub fn probe_container(path: &std::path::Path) -> Result<ContainerMetadata> {
     // SAFETY: fmt_ctx is valid (open succeeded).
     let ret = unsafe { avformat_find_stream_info(guard.ctx, ptr::null_mut()) };
     check_ffmpeg(ret, "avformat_find_stream_info")
-        .map_err(|e| EngineError::Probe(format!("{e}")))?;
+        .map_err(|e| EngineError::Probe(e.to_string()))?;
 
     // Find best video stream.
     let stream_index = unsafe {
