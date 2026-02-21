@@ -50,3 +50,4 @@ fn inspect(path: &Path) -> Result<()> {
 - BSF state machine now preserves packets across `EAGAIN` and retries safely.
 - EOF handling now performs explicit BSF flush + drain before terminal `None`.
 - Added deterministic unit tests for `EAGAIN` retry and flush-drain behavior.
+- Added a boundary test that guards against raw-frame decode API usage in demux/mux paths.
