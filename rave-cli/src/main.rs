@@ -14,27 +14,28 @@ use std::time::{Duration, Instant};
 use std::{io::IsTerminal, sync::atomic::Ordering};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use serde::Deserialize;
 
 use rave_core::backend::UpscaleBackend;
-use rave_core::codec_traits::{BitstreamSink, BitstreamSource, FrameEncoder};
+use rave_core::codec_traits::FrameEncoder;
 use rave_core::context::GpuContext;
 use rave_core::error::{EngineError, Result};
 use rave_core::ffi_types::cudaVideoCodec;
 use rave_core::types::FrameEnvelope;
-use rave_cuda::kernels::{ModelPrecision, PreprocessKernels};
-use rave_ffmpeg::ffmpeg_demuxer::FfmpegDemuxer;
-use rave_ffmpeg::ffmpeg_muxer::FfmpegMuxer;
-use rave_ffmpeg::file_sink::FileBitstreamSink;
-use rave_ffmpeg::file_source::FileBitstreamSource;
-use rave_ffmpeg::probe_container;
-use rave_nvcodec::nvdec::NvDecoder;
-use rave_nvcodec::nvenc::{NvEncConfig, NvEncoder};
 use rave_pipeline::pipeline::{PipelineConfig, PipelineMetrics, UpscalePipeline};
-use rave_pipeline::{
-    BatchConfig as GraphBatchConfig, EnhanceConfig, PipelineReport, PrecisionPolicyConfig,
-    ProfilePreset, RunContract, StageConfig, StageGraph, StageId,
+use rave_pipeline::runtime::{
+    Decoder as PipelineDecoder, Encoder as PipelineEncoder, ResolvedInput, RuntimeRequest,
+    RuntimeSetup, create_context_and_kernels as pipeline_create_context_and_kernels,
+    create_decoder as pipeline_create_decoder,
+    create_nvenc_encoder as pipeline_create_nvenc_encoder,
+    parse_precision as pipeline_parse_precision, prepare_runtime as pipeline_prepare_runtime,
+    resolve_input as pipeline_resolve_input,
 };
-use rave_tensorrt::tensorrt::TensorRtBackend;
+use rave_pipeline::{
+    AuditLevel, BatchConfig as GraphBatchConfig, EnhanceConfig, GRAPH_SCHEMA_VERSION,
+    PipelineReport, PrecisionPolicyConfig, ProfilePreset, RunContract, StageConfig, StageGraph,
+    StageId,
+};
 
 #[cfg(target_os = "linux")]
 use std::collections::HashSet;
@@ -209,6 +210,10 @@ struct BenchmarkArgs {
 
 #[derive(Args, Debug, Clone)]
 struct ValidateArgs {
+    /// Optional validate fixture JSON path (preconfigured scenario).
+    #[arg(long = "fixture")]
+    fixture: Option<PathBuf>,
+
     /// Input video file.
     #[arg(short = 'i', long = "input")]
     input: Option<PathBuf>,
@@ -309,30 +314,6 @@ enum ProgressMode {
     Off,
     Human,
     Jsonl,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct ResolvedInput {
-    codec: cudaVideoCodec,
-    width: u32,
-    height: u32,
-    fps_num: u32,
-    fps_den: u32,
-    input_is_container: bool,
-}
-
-struct RuntimeSetup {
-    ctx: Arc<GpuContext>,
-    kernels: Arc<PreprocessKernels>,
-    backend: Arc<TensorRtBackend>,
-    precision: ModelPrecision,
-    decoded_capacity: usize,
-    preprocessed_capacity: usize,
-    upscaled_capacity: usize,
-    input: ResolvedInput,
-    out_width: u32,
-    out_height: u32,
-    nv12_pitch: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -456,16 +437,7 @@ struct ProgressSnapshot {
     encoded: u64,
 }
 
-// Known container extensions.
-const CONTAINER_EXTENSIONS: &[&str] = &["mp4", "mkv", "mov", "avi", "webm", "ts", "flv"];
 const JSON_SCHEMA_VERSION: u32 = 1;
-
-fn is_container(path: &Path) -> bool {
-    path.extension()
-        .and_then(|ext| ext.to_str())
-        .map(|ext| CONTAINER_EXTENSIONS.contains(&ext.to_lowercase().as_str()))
-        .unwrap_or(false)
-}
 
 fn main() {
     #[cfg(target_os = "linux")]
@@ -1040,13 +1012,7 @@ async fn run_upscale_with_graph(args: UpscaleArgs) -> Result<()> {
     )?;
 
     let device = args.shared.device.unwrap_or(0) as usize;
-    let ctx = GpuContext::new(device)?;
-    if let Some(vram_limit_mib) = args.shared.vram_limit
-        && vram_limit_mib > 0
-    {
-        ctx.set_vram_limit(vram_limit_mib * 1024 * 1024);
-    }
-    let kernels = Arc::new(PreprocessKernels::compile(ctx.device())?);
+    let (ctx, kernels) = pipeline_create_context_and_kernels(device, args.shared.vram_limit)?;
 
     let pipeline = UpscalePipeline::new(
         ctx.clone(),
@@ -1056,7 +1022,9 @@ async fn run_upscale_with_graph(args: UpscaleArgs) -> Result<()> {
             preprocessed_capacity: args.shared.preprocess_cap.unwrap_or(2),
             upscaled_capacity: args.shared.upscale_cap.unwrap_or(4),
             encoder_nv12_pitch: 256,
-            model_precision: parse_precision(args.shared.precision.as_deref().unwrap_or("fp32"))?,
+            model_precision: pipeline_parse_precision(
+                args.shared.precision.as_deref().unwrap_or("fp32"),
+            )?,
             enable_profiler: true,
             strict_no_host_copies: false,
         },
@@ -1170,6 +1138,133 @@ impl ValidateSummary {
     }
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+struct ValidateFixture {
+    input: Option<PathBuf>,
+    output: Option<PathBuf>,
+    graph: Option<PathBuf>,
+    model: Option<PathBuf>,
+    model_env: Option<String>,
+    profile: Option<String>,
+    determinism_runs: Option<u32>,
+    determinism_samples: Option<usize>,
+    max_infer_us: Option<f64>,
+    max_vram_mb: Option<usize>,
+    allow_hash_skipped: Option<bool>,
+}
+
+impl ValidateFixture {
+    fn resolve_paths(mut self, base: &Path) -> Self {
+        self.input = self.input.map(|path| resolve_fixture_path(base, path));
+        self.output = self.output.map(|path| resolve_fixture_path(base, path));
+        self.graph = self.graph.map(|path| resolve_fixture_path(base, path));
+        self.model = self.model.map(|path| resolve_fixture_path(base, path));
+        self
+    }
+}
+
+fn resolve_fixture_path(base: &Path, path: PathBuf) -> PathBuf {
+    if path.is_absolute() {
+        path
+    } else {
+        base.join(path)
+    }
+}
+
+fn load_validate_fixture(path: &Path) -> Result<ValidateFixture> {
+    let data = std::fs::read_to_string(path).map_err(|err| {
+        EngineError::Pipeline(format!(
+            "Failed to read validate fixture {}: {err}",
+            path.display()
+        ))
+    })?;
+    let fixture = serde_json::from_str::<ValidateFixture>(&data).map_err(|err| {
+        EngineError::Pipeline(format!(
+            "Invalid validate fixture JSON {}: {err}",
+            path.display()
+        ))
+    })?;
+    let base = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    Ok(fixture.resolve_paths(base))
+}
+
+fn parse_profile_arg(raw: &str) -> Result<ProfileArg> {
+    match raw.to_ascii_lowercase().as_str() {
+        "dev" => Ok(ProfileArg::Dev),
+        "production_strict" => Ok(ProfileArg::ProductionStrict),
+        other => Err(EngineError::Pipeline(format!(
+            "Unknown validate fixture profile '{other}'. Use dev or production_strict."
+        ))),
+    }
+}
+
+fn env_flag_enabled(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn resolve_fixture_model_path(fixture: &ValidateFixture) -> Result<Option<PathBuf>> {
+    if let Some(path) = &fixture.model {
+        return Ok(Some(path.clone()));
+    }
+    if let Some(env_name) = &fixture.model_env {
+        let value = std::env::var(env_name).map_err(|_| {
+            EngineError::Pipeline(format!(
+                "Validate fixture requires env var {} to resolve model path",
+                env_name
+            ))
+        })?;
+        return Ok(Some(PathBuf::from(value)));
+    }
+    Ok(None)
+}
+
+fn emit_validate_skip(
+    profile: ProfileArg,
+    json: bool,
+    progress_mode: ProgressMode,
+    runs: u32,
+    warning: String,
+) {
+    let summary = ValidateSummary {
+        ok: true,
+        skipped: true,
+        profile,
+        runs,
+        determinism_equal: None,
+        max_infer_us: 0.0,
+        peak_vram_mb: 0,
+        frames_decoded: 0,
+        frames_encoded: 0,
+        warnings: vec![warning],
+    };
+    if json {
+        println!("{}", summary.to_json());
+    } else {
+        println!("{}", summary.to_human());
+    }
+    emit_progress_line(
+        "validate",
+        progress_mode,
+        Duration::from_millis(0),
+        ProgressSnapshot {
+            decoded: 0,
+            inferred: 0,
+            encoded: 0,
+        },
+        true,
+    );
+}
+
 async fn run_validate(args: ValidateArgs) -> Result<()> {
     let progress_mode = resolve_progress_mode(args.progress, args.jsonl);
     emit_progress_line(
@@ -1184,82 +1279,115 @@ async fn run_validate(args: ValidateArgs) -> Result<()> {
         false,
     );
 
-    let profile = profile_to_preset(args.profile);
-    let Some(input) = args.input.as_ref() else {
-        let summary = ValidateSummary {
-            ok: true,
-            skipped: true,
-            profile: args.profile,
-            runs: 0,
-            determinism_equal: None,
-            max_infer_us: 0.0,
-            peak_vram_mb: 0,
-            frames_decoded: 0,
-            frames_encoded: 0,
-            warnings: vec!["no input provided; validation skipped".into()],
-        };
-        if args.json {
-            println!("{}", summary.to_json());
-        } else {
-            println!("{}", summary.to_human());
-        }
-        emit_progress_line(
-            "validate",
+    let fixture = args
+        .fixture
+        .as_deref()
+        .map(load_validate_fixture)
+        .transpose()?;
+    let ci_gpu_mode = env_flag_enabled("RAVE_CI_GPU");
+    let best_effort = if ci_gpu_mode { false } else { args.best_effort };
+
+    let mut profile_arg = args.profile;
+    if matches!(profile_arg, ProfileArg::ProductionStrict)
+        && let Some(raw_profile) = fixture.as_ref().and_then(|f| f.profile.as_deref())
+    {
+        profile_arg = parse_profile_arg(raw_profile)?;
+    }
+    let profile = profile_to_preset(profile_arg);
+
+    let input = args
+        .input
+        .clone()
+        .or_else(|| fixture.as_ref().and_then(|f| f.input.clone()));
+    let Some(input_path) = input else {
+        emit_validate_skip(
+            profile_arg,
+            args.json,
             progress_mode,
-            Duration::from_millis(0),
-            ProgressSnapshot {
-                decoded: 0,
-                inferred: 0,
-                encoded: 0,
-            },
-            true,
+            0,
+            "no input provided; validation skipped".into(),
         );
         return Ok(());
     };
 
-    let graph = load_stage_graph(args.graph.as_deref(), args.model.as_ref(), None)?;
-    let device = args.device.unwrap_or(0) as usize;
-    let output_path = args
-        .output
-        .clone()
-        .unwrap_or_else(|| std::env::temp_dir().join("rave_validate_out.mp4"));
+    let fixture_model = match fixture.as_ref().map(resolve_fixture_model_path).transpose() {
+        Ok(model) => model.flatten(),
+        Err(err) if best_effort => {
+            emit_validate_skip(profile_arg, args.json, progress_mode, 0, err.to_string());
+            return Ok(());
+        }
+        Err(err) => return Err(err),
+    };
 
-    let ctx = match GpuContext::new(device) {
-        Ok(ctx) => ctx,
-        Err(err) if args.best_effort => {
-            let summary = ValidateSummary {
-                ok: true,
-                skipped: true,
-                profile: args.profile,
-                runs: 0,
-                determinism_equal: None,
-                max_infer_us: 0.0,
-                peak_vram_mb: 0,
-                frames_decoded: 0,
-                frames_encoded: 0,
-                warnings: vec![format!("runtime unavailable: {err}")],
-            };
-            if args.json {
-                println!("{}", summary.to_json());
-            } else {
-                println!("{}", summary.to_human());
-            }
-            emit_progress_line(
-                "validate",
+    let graph_path = args
+        .graph
+        .clone()
+        .or_else(|| fixture.as_ref().and_then(|f| f.graph.clone()));
+    let model = args.model.clone().or(fixture_model);
+    let mut graph = match load_stage_graph(graph_path.as_deref(), model.as_ref(), None) {
+        Ok(graph) => graph,
+        Err(err) if best_effort => {
+            emit_validate_skip(
+                profile_arg,
+                args.json,
                 progress_mode,
-                Duration::from_millis(0),
-                ProgressSnapshot {
-                    decoded: 0,
-                    inferred: 0,
-                    encoded: 0,
-                },
-                true,
+                0,
+                format!("validation graph unavailable: {err}"),
             );
             return Ok(());
         }
         Err(err) => return Err(err),
     };
-    let kernels = Arc::new(PreprocessKernels::compile(ctx.device())?);
+    if graph_path.is_some()
+        && let Some(model_path) = model.as_deref()
+    {
+        override_enhance_model_path(&mut graph, model_path);
+    }
+
+    let device = args.device.unwrap_or(0) as usize;
+    let output_path = args
+        .output
+        .clone()
+        .or_else(|| fixture.as_ref().and_then(|f| f.output.clone()))
+        .unwrap_or_else(|| std::env::temp_dir().join("rave_validate_out.mp4"));
+
+    let mut determinism_runs = args.determinism_runs;
+    if determinism_runs == 2
+        && let Some(value) = fixture.as_ref().and_then(|f| f.determinism_runs)
+    {
+        determinism_runs = value;
+    }
+    let mut determinism_samples = args.determinism_samples;
+    if determinism_samples == 0
+        && let Some(value) = fixture.as_ref().and_then(|f| f.determinism_samples)
+    {
+        determinism_samples = value;
+    }
+    let max_infer_us = args
+        .max_infer_us
+        .or_else(|| fixture.as_ref().and_then(|f| f.max_infer_us));
+    let max_vram_mb = args
+        .max_vram_mb
+        .or_else(|| fixture.as_ref().and_then(|f| f.max_vram_mb));
+    let allow_hash_skipped = fixture
+        .as_ref()
+        .and_then(|f| f.allow_hash_skipped)
+        .unwrap_or(true);
+
+    let (ctx, kernels) = match pipeline_create_context_and_kernels(device, None) {
+        Ok(resources) => resources,
+        Err(err) if best_effort => {
+            emit_validate_skip(
+                profile_arg,
+                args.json,
+                progress_mode,
+                0,
+                format!("runtime unavailable: {err}"),
+            );
+            return Ok(());
+        }
+        Err(err) => return Err(err),
+    };
     let pipeline = UpscalePipeline::new(
         ctx,
         kernels,
@@ -1268,7 +1396,7 @@ async fn run_validate(args: ValidateArgs) -> Result<()> {
             preprocessed_capacity: 2,
             upscaled_capacity: 4,
             encoder_nv12_pitch: 256,
-            model_precision: ModelPrecision::F16,
+            model_precision: pipeline_parse_precision("fp16")?,
             enable_profiler: true,
             strict_no_host_copies: false,
         },
@@ -1276,9 +1404,12 @@ async fn run_validate(args: ValidateArgs) -> Result<()> {
 
     let mut contract = RunContract::for_profile(profile);
     contract.requested_device = device as u32;
-    contract.determinism_hash_frames = args.determinism_samples;
-    let runs = if matches!(args.profile, ProfileArg::ProductionStrict) {
-        args.determinism_runs.max(1)
+    contract.determinism_hash_frames = determinism_samples;
+    if determinism_samples > 0 && allow_hash_skipped {
+        contract.fail_on_audit_warn = false;
+    }
+    let runs = if matches!(profile_arg, ProfileArg::ProductionStrict) {
+        determinism_runs.max(1)
     } else {
         1
     };
@@ -1300,38 +1431,23 @@ async fn run_validate(args: ValidateArgs) -> Result<()> {
         };
 
         let report = match pipeline
-            .run_graph(input, &run_output, graph.clone(), profile, contract.clone())
+            .run_graph(
+                &input_path,
+                &run_output,
+                graph.clone(),
+                profile,
+                contract.clone(),
+            )
             .await
         {
             Ok(report) => report,
-            Err(err) if args.best_effort => {
-                let summary = ValidateSummary {
-                    ok: true,
-                    skipped: true,
-                    profile: args.profile,
-                    runs: idx,
-                    determinism_equal: None,
-                    max_infer_us: 0.0,
-                    peak_vram_mb: 0,
-                    frames_decoded: 0,
-                    frames_encoded: 0,
-                    warnings: vec![format!("validation execution skipped: {err}")],
-                };
-                if args.json {
-                    println!("{}", summary.to_json());
-                } else {
-                    println!("{}", summary.to_human());
-                }
-                emit_progress_line(
-                    "validate",
+            Err(err) if best_effort => {
+                emit_validate_skip(
+                    profile_arg,
+                    args.json,
                     progress_mode,
-                    Duration::from_millis(0),
-                    ProgressSnapshot {
-                        decoded: 0,
-                        inferred: 0,
-                        encoded: 0,
-                    },
-                    true,
+                    idx,
+                    format!("validation execution skipped: {err}"),
                 );
                 return Ok(());
             }
@@ -1350,14 +1466,14 @@ async fn run_validate(args: ValidateArgs) -> Result<()> {
     };
     let peak_vram_mb = first.vram_peak_bytes / (1024 * 1024);
 
-    if let Some(limit) = args.max_infer_us
+    if let Some(limit) = max_infer_us
         && infer_avg > limit
     {
         return Err(EngineError::InvariantViolation(format!(
             "validate threshold failed: infer_avg_us={infer_avg:.3} > {limit:.3}"
         )));
     }
-    if let Some(limit) = args.max_vram_mb
+    if let Some(limit) = max_vram_mb
         && peak_vram_mb > limit
     {
         return Err(EngineError::InvariantViolation(format!(
@@ -1371,7 +1487,11 @@ async fn run_validate(args: ValidateArgs) -> Result<()> {
         )));
     }
 
-    let determinism_equal = if runs > 1 && contract.deterministic_output {
+    let determinism_requested = contract.determinism_hash_frames > 0;
+    let hashes_available = reports
+        .iter()
+        .all(|report| !report.stage_checksums.is_empty());
+    let determinism_equal = if runs > 1 && contract.deterministic_output && hashes_available {
         let baseline = &reports[0].stage_checksums;
         Some(
             reports
@@ -1382,6 +1502,11 @@ async fn run_validate(args: ValidateArgs) -> Result<()> {
     } else {
         None
     };
+    if determinism_requested && !hashes_available && !allow_hash_skipped {
+        return Err(EngineError::InvariantViolation(
+            "validate determinism failed: checkpoint hashes were requested but unavailable".into(),
+        ));
+    }
     if determinism_equal == Some(false) {
         return Err(EngineError::InvariantViolation(
             "validate determinism failed: stage checksums differ across runs".into(),
@@ -1391,7 +1516,7 @@ async fn run_validate(args: ValidateArgs) -> Result<()> {
     let summary = ValidateSummary {
         ok: true,
         skipped: false,
-        profile: args.profile,
+        profile: profile_arg,
         runs,
         determinism_equal,
         max_infer_us: infer_avg,
@@ -1401,8 +1526,8 @@ async fn run_validate(args: ValidateArgs) -> Result<()> {
         warnings: reports
             .iter()
             .flat_map(|report| report.audit.iter())
-            .filter(|check| matches!(check.status, rave_pipeline::AuditStatus::Warn))
-            .map(|check| format!("{}: {}", check.name, check.detail))
+            .filter(|check| matches!(check.level, AuditLevel::Warn))
+            .map(|check| format!("{}: {}", check.code, check.message))
             .collect(),
     };
 
@@ -1915,67 +2040,21 @@ fn benchmark_output_path(args: &BenchmarkArgs) -> PathBuf {
 }
 
 async fn prepare_runtime(shared: &SharedVideoArgs, input: ResolvedInput) -> Result<RuntimeSetup> {
-    let precision = parse_precision(shared.precision.as_deref().unwrap_or("fp32"))?;
     let device = shared.device.unwrap_or(0) as usize;
-
-    tracing::info!(
-        input = %shared.input.display(),
-        model = %shared.model.display(),
-        precision = ?precision,
+    pipeline_prepare_runtime(&RuntimeRequest {
+        model_path: shared.model.clone(),
+        precision: shared
+            .precision
+            .clone()
+            .unwrap_or_else(|| "fp32".to_string()),
         device,
-        "Initializing runtime"
-    );
-
-    let ctx = GpuContext::new(device)?;
-    if let Some(vram_limit_mib) = shared.vram_limit
-        && vram_limit_mib > 0
-    {
-        ctx.set_vram_limit(vram_limit_mib * 1024 * 1024);
-    }
-
-    let kernels = Arc::new(PreprocessKernels::compile(ctx.device())?);
-
-    let decoded_capacity = shared.decode_cap.unwrap_or(4);
-    let preprocessed_capacity = shared.preprocess_cap.unwrap_or(2);
-    let upscaled_capacity = shared.upscale_cap.unwrap_or(4);
-
-    let backend = Arc::new(TensorRtBackend::new(
-        shared.model.clone(),
-        ctx.clone(),
-        device as i32,
-        upscaled_capacity + 2,
-        upscaled_capacity,
-    ));
-    backend.initialize().await?;
-
-    let model_meta = backend.metadata()?;
-    let out_width = input.width * model_meta.scale;
-    let out_height = input.height * model_meta.scale;
-    let nv12_pitch = (out_width as usize).div_ceil(256) * 256;
-
-    tracing::info!(
-        model_name = %model_meta.name,
-        scale = model_meta.scale,
-        input_w = input.width,
-        input_h = input.height,
-        output_w = out_width,
-        output_h = out_height,
-        "Runtime ready"
-    );
-
-    Ok(RuntimeSetup {
-        ctx,
-        kernels,
-        backend,
-        precision,
-        decoded_capacity,
-        preprocessed_capacity,
-        upscaled_capacity,
-        input,
-        out_width,
-        out_height,
-        nv12_pitch,
+        vram_limit_mib: shared.vram_limit,
+        decode_cap: shared.decode_cap,
+        preprocess_cap: shared.preprocess_cap,
+        upscale_cap: shared.upscale_cap,
+        resolved_input: input,
     })
+    .await
 }
 
 fn ensure_required_paths(args: &SharedVideoArgs) -> Result<()> {
@@ -1995,41 +2074,18 @@ fn ensure_required_paths(args: &SharedVideoArgs) -> Result<()> {
 }
 
 fn resolve_input(shared: &SharedVideoArgs) -> Result<ResolvedInput> {
-    let input_is_container = is_container(&shared.input);
-    if input_is_container {
-        let meta = probe_container(&shared.input)?;
-        let codec = if let Some(ref c) = shared.codec {
-            parse_codec(c)?
-        } else {
-            meta.codec
-        };
-        Ok(ResolvedInput {
-            codec,
-            width: shared.width.unwrap_or(meta.width),
-            height: shared.height.unwrap_or(meta.height),
-            fps_num: shared.fps_num.unwrap_or(meta.fps_num),
-            fps_den: shared.fps_den.unwrap_or(meta.fps_den),
-            input_is_container,
-        })
-    } else {
-        Ok(ResolvedInput {
-            codec: parse_codec(shared.codec.as_deref().unwrap_or("hevc"))?,
-            width: shared.width.unwrap_or(1920),
-            height: shared.height.unwrap_or(1080),
-            fps_num: shared.fps_num.unwrap_or(30),
-            fps_den: shared.fps_den.unwrap_or(1),
-            input_is_container,
-        })
-    }
+    pipeline_resolve_input(
+        &shared.input,
+        shared.codec.as_deref(),
+        shared.width,
+        shared.height,
+        shared.fps_num,
+        shared.fps_den,
+    )
 }
 
-fn create_decoder(setup: &RuntimeSetup, input_path: &Path) -> Result<NvDecoder> {
-    let source: Box<dyn BitstreamSource> = if setup.input.input_is_container {
-        Box::new(FfmpegDemuxer::new(input_path, setup.input.codec)?)
-    } else {
-        Box::new(FileBitstreamSource::new(input_path.to_path_buf())?)
-    };
-    NvDecoder::new(setup.ctx.clone(), source, setup.input.codec)
+fn create_decoder(setup: &RuntimeSetup, input_path: &Path) -> Result<PipelineDecoder> {
+    pipeline_create_decoder(setup, input_path)
 }
 
 fn create_nvenc_encoder(
@@ -2038,44 +2094,8 @@ fn create_nvenc_encoder(
     bitrate_kbps: u32,
     fps_num: u32,
     fps_den: u32,
-) -> Result<NvEncoder> {
-    let sink: Box<dyn BitstreamSink> = if is_container(output_path) {
-        Box::new(FfmpegMuxer::new(
-            output_path,
-            setup.out_width,
-            setup.out_height,
-            fps_num,
-            fps_den,
-        )?)
-    } else {
-        Box::new(FileBitstreamSink::new(output_path.to_path_buf())?)
-    };
-
-    let enc_config = NvEncConfig {
-        width: setup.out_width,
-        height: setup.out_height,
-        fps_num,
-        fps_den,
-        bitrate: bitrate_kbps * 1000,
-        max_bitrate: 0,
-        gop_length: 250,
-        b_frames: 0,
-        nv12_pitch: setup.nv12_pitch as u32,
-    };
-
-    let cuda_ctx_raw: *mut std::ffi::c_void =
-        *setup.ctx.device().cu_primary_ctx() as *mut std::ffi::c_void;
-    NvEncoder::new(cuda_ctx_raw, sink, enc_config)
-}
-
-fn parse_precision(s: &str) -> Result<ModelPrecision> {
-    match s.to_ascii_lowercase().as_str() {
-        "fp32" | "f32" | "float32" => Ok(ModelPrecision::F32),
-        "fp16" | "f16" | "float16" | "half" => Ok(ModelPrecision::F16),
-        other => Err(EngineError::Pipeline(format!(
-            "Unknown precision '{other}'. Use fp32 or fp16."
-        ))),
-    }
+) -> Result<PipelineEncoder> {
+    pipeline_create_nvenc_encoder(setup, output_path, bitrate_kbps, fps_num, fps_den)
 }
 
 fn parse_precision_policy(s: &str) -> Result<PrecisionPolicyConfig> {
@@ -2119,6 +2139,7 @@ fn load_stage_graph(
             .clone();
 
         StageGraph {
+            graph_schema_version: GRAPH_SCHEMA_VERSION,
             stages: vec![StageConfig::Enhance {
                 id: StageId(1),
                 config: EnhanceConfig {
@@ -2135,12 +2156,10 @@ fn load_stage_graph(
     Ok(graph)
 }
 
-fn parse_codec(s: &str) -> Result<cudaVideoCodec> {
-    match s.to_ascii_lowercase().as_str() {
-        "hevc" | "h265" | "265" => Ok(cudaVideoCodec::HEVC),
-        "h264" | "264" | "avc" => Ok(cudaVideoCodec::H264),
-        other => Err(EngineError::Pipeline(format!(
-            "Unknown codec '{other}'. Use hevc or h264."
-        ))),
+fn override_enhance_model_path(graph: &mut StageGraph, model_path: &Path) {
+    for stage in &mut graph.stages {
+        if let StageConfig::Enhance { config, .. } = stage {
+            config.model_path = model_path.to_path_buf();
+        }
     }
 }

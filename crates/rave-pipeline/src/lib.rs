@@ -2,13 +2,14 @@
 
 pub mod inference;
 pub mod pipeline;
+pub mod runtime;
 pub mod stage_graph;
 
 pub use pipeline::{PipelineConfig, PipelineMetrics, UpscalePipeline};
 pub use stage_graph::{
-    AuditCheck, AuditStatus, BatchConfig, BlurConfig, BlurMode, EnhanceConfig, PipelineReport,
-    PrecisionPolicyConfig, ProfilePreset, Rect, RunContract, StageConfig, StageGraph, StageId,
-    StageKind, StageTimingReport, SwapConfig,
+    AuditItem, AuditLevel, BatchConfig, BlurConfig, BlurMode, EnhanceConfig, GRAPH_SCHEMA_VERSION,
+    PipelineReport, PrecisionPolicyConfig, ProfilePreset, Rect, RunContract, StageConfig,
+    StageGraph, StageId, StageKind, StageTimingReport, SwapConfig,
 };
 
 #[cfg(test)]

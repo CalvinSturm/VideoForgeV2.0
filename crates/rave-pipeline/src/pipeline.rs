@@ -66,6 +66,7 @@ use rave_core::context::{GpuContext, PerfStage};
 use rave_core::error::{EngineError, Result};
 use rave_core::ffi_types::cudaVideoCodec;
 use rave_core::types::{FrameEnvelope, GpuTexture, PixelFormat};
+use rave_cuda::blur::{BlurRegion, FaceBlurConfig, FaceBlurEngine};
 use rave_cuda::kernels::{ModelPrecision, PreprocessKernels};
 use rave_ffmpeg::ffmpeg_demuxer::FfmpegDemuxer;
 use rave_ffmpeg::ffmpeg_muxer::FfmpegMuxer;
@@ -77,7 +78,7 @@ use rave_nvcodec::nvenc::{NvEncConfig, NvEncoder};
 use rave_tensorrt::tensorrt::TensorRtBackend;
 
 use crate::stage_graph::{
-    AuditCheck, AuditStatus, PipelineReport, ProfilePreset, RunContract, StageConfig, StageGraph,
+    AuditItem, AuditLevel, PipelineReport, ProfilePreset, RunContract, StageConfig, StageGraph,
     StageKind, StageTimingReport,
 };
 
@@ -540,8 +541,9 @@ impl UpscalePipeline {
             trt.clone(),
             graph.clone(),
             self.ctx.clone(),
+            self.kernels.clone(),
             contract.clone(),
-        ));
+        )?);
         graph_backend.initialize().await?;
 
         let run_result = pipeline.run(decoder, graph_backend.clone(), encoder).await;
@@ -561,43 +563,56 @@ impl UpscalePipeline {
 
         let mut audit = graph_backend.audit_checks();
         if profile.strict_no_host_copies() {
-            audit.push(AuditCheck {
-                name: "strict_no_host_copies".into(),
-                status: AuditStatus::Pass,
-                detail: "strict no-host-copies mode enabled".into(),
+            audit.push(AuditItem {
+                level: AuditLevel::Pass,
+                code: "STRICT_NO_HOST_COPIES".into(),
+                stage_id: None,
+                message: "strict no-host-copies mode enabled".into(),
             });
         }
 
         let stage_checksums = graph_backend.take_stage_hashes();
         if contract.deterministic_output && contract.determinism_hash_frames > 0 {
             if stage_checksums.is_empty() {
-                audit.push(AuditCheck {
-                    name: "determinism_checkpoint".into(),
-                    status: AuditStatus::Warn,
-                    detail: "determinism hash requested but no hashes were produced".into(),
+                audit.push(AuditItem {
+                    level: AuditLevel::Warn,
+                    code: "DETERMINISM_HASH_EMPTY".into(),
+                    stage_id: None,
+                    message: "determinism hash requested but no hashes were produced".into(),
                 });
             } else {
-                audit.push(AuditCheck {
-                    name: "determinism_checkpoint".into(),
-                    status: AuditStatus::Pass,
-                    detail: format!("captured {} stage checksum(s)", stage_checksums.len()),
+                audit.push(AuditItem {
+                    level: AuditLevel::Pass,
+                    code: "DETERMINISM_HASH_CAPTURED".into(),
+                    stage_id: None,
+                    message: format!("captured {} stage checksum(s)", stage_checksums.len()),
                 });
             }
         }
 
         if audit
             .iter()
-            .any(|check| matches!(check.status, AuditStatus::Fail))
+            .any(|check| matches!(check.level, AuditLevel::Fail))
         {
             return Err(EngineError::InvariantViolation(format!(
                 "Graph run failed audits: {}",
                 audit_failures(&audit)
             )));
         }
+        if profile == ProfilePreset::ProductionStrict
+            && audit
+                .iter()
+                .any(|check| check.code == "STAGE_STUB" && matches!(check.level, AuditLevel::Warn))
+        {
+            return Err(EngineError::InvariantViolation(format!(
+                "Graph run rejected stub stage under production_strict: {}",
+                audit_failures(&audit)
+            )));
+        }
         if contract.fail_on_audit_warn
             && audit
                 .iter()
-                .any(|check| matches!(check.status, AuditStatus::Warn))
+                .any(|check| matches!(check.level, AuditLevel::Warn))
         {
             return Err(EngineError::InvariantViolation(format!(
                 "Graph run has audit warnings: {}",
@@ -1067,21 +1082,32 @@ fn resolve_graph_input(path: &Path) -> Result<GraphInputConfig> {
     })
 }
 
-fn audit_failures(audit: &[AuditCheck]) -> String {
+fn audit_failures(audit: &[AuditItem]) -> String {
     audit
         .iter()
-        .filter(|check| !matches!(check.status, AuditStatus::Pass))
-        .map(|check| format!("{}={}", check.name, check.detail))
+        .filter(|item| !matches!(item.level, AuditLevel::Pass))
+        .map(|item| {
+            let stage = item
+                .stage_id
+                .map(|id| id.0.to_string())
+                .unwrap_or_else(|| "none".into());
+            format!("{}:{:?}:{stage}:{}", item.code, item.level, item.message)
+        })
         .collect::<Vec<_>>()
         .join("; ")
+}
+
+struct BlurStageRuntime {
+    stage_id: crate::stage_graph::StageId,
+    config: FaceBlurConfig,
+    engine: Mutex<FaceBlurEngine>,
 }
 
 #[derive(Default)]
 struct GraphBackendState {
     hashed_frames: usize,
     stage_hashes: Vec<String>,
-    audit: Vec<AuditCheck>,
-    warned_blur_stub: bool,
+    audit: Vec<AuditItem>,
     warned_swap_stub: bool,
     warned_hash_feature: bool,
 }
@@ -1089,9 +1115,10 @@ struct GraphBackendState {
 struct GraphBackend {
     trt: Arc<TensorRtBackend>,
     graph: StageGraph,
-    #[cfg(feature = "debug-host-copies")]
     ctx: Arc<GpuContext>,
+    kernels: Arc<PreprocessKernels>,
     contract: RunContract,
+    blur_stages: Vec<BlurStageRuntime>,
     state: Mutex<GraphBackendState>,
 }
 
@@ -1100,34 +1127,62 @@ impl GraphBackend {
         trt: Arc<TensorRtBackend>,
         graph: StageGraph,
         ctx: Arc<GpuContext>,
+        kernels: Arc<PreprocessKernels>,
         contract: RunContract,
-    ) -> Self {
-        #[cfg(not(feature = "debug-host-copies"))]
-        let _ = ctx;
-        Self {
+    ) -> Result<Self> {
+        let mut blur_stages = Vec::new();
+        for stage in &graph.stages {
+            if let StageConfig::FaceBlur { id, config } = stage {
+                let regions = config.regions.as_ref().map(|items| {
+                    items
+                        .iter()
+                        .map(|r| BlurRegion {
+                            x: r.x,
+                            y: r.y,
+                            width: r.width,
+                            height: r.height,
+                        })
+                        .collect::<Vec<_>>()
+                });
+                blur_stages.push(BlurStageRuntime {
+                    stage_id: *id,
+                    config: FaceBlurConfig {
+                        sigma: config.sigma,
+                        iterations: config.iterations,
+                        regions,
+                    },
+                    engine: Mutex::new(FaceBlurEngine::compile(ctx.device())?),
+                });
+            }
+        }
+
+        Ok(Self {
             trt,
             graph,
-            #[cfg(feature = "debug-host-copies")]
             ctx,
+            kernels,
             contract,
+            blur_stages,
             state: Mutex::new(GraphBackendState::default()),
-        }
+        })
     }
 
     fn push_warn_once(
         &self,
         flag: fn(&mut GraphBackendState) -> &mut bool,
-        name: &str,
-        detail: &str,
+        code: &str,
+        stage_id: Option<crate::stage_graph::StageId>,
+        message: &str,
     ) {
         let mut guard = self.state.lock().unwrap();
         let marked = flag(&mut guard);
         if !*marked {
             *marked = true;
-            guard.audit.push(AuditCheck {
-                name: name.to_string(),
-                status: AuditStatus::Warn,
-                detail: detail.to_string(),
+            guard.audit.push(AuditItem {
+                level: AuditLevel::Warn,
+                code: code.to_string(),
+                stage_id,
+                message: message.to_string(),
             });
         }
     }
@@ -1154,10 +1209,11 @@ impl GraphBackend {
                     guard.hashed_frames += 1;
                 }
                 Err(err) => {
-                    self.state.lock().unwrap().audit.push(AuditCheck {
-                        name: "determinism_checkpoint".into(),
-                        status: AuditStatus::Fail,
-                        detail: format!("host readback for determinism hash failed: {err}"),
+                    self.state.lock().unwrap().audit.push(AuditItem {
+                        level: AuditLevel::Fail,
+                        code: "DETERMINISM_HASH_READBACK_FAILED".into(),
+                        stage_id: None,
+                        message: format!("host readback for determinism hash failed: {err}"),
                     });
                 }
             }
@@ -1169,28 +1225,68 @@ impl GraphBackend {
         #[cfg(not(feature = "debug-host-copies"))]
         self.push_warn_once(
             |state| &mut state.warned_hash_feature,
-            "determinism_checkpoint",
+            "DETERMINISM_HASH_DISABLED",
+            None,
             "determinism hashing requested but feature `debug-host-copies` is disabled",
         );
     }
 
-    fn apply_face_blur_stub(&self, _stage_id: u32) {
-        self.push_warn_once(
-            |state| &mut state.warned_blur_stub,
-            "face_blur",
-            "FaceBlur stage is an MVP GPU no-op stub in this release",
-        );
+    fn apply_face_blur(
+        &self,
+        stage_id: crate::stage_graph::StageId,
+        texture: GpuTexture,
+    ) -> Result<GpuTexture> {
+        let runtime = self
+            .blur_stages
+            .iter()
+            .find(|runtime| runtime.stage_id == stage_id)
+            .ok_or_else(|| {
+                EngineError::InvariantViolation(format!(
+                    "FaceBlur stage runtime missing for stage {}",
+                    stage_id.0
+                ))
+            })?;
+
+        let mut engine = runtime.engine.lock().unwrap();
+        match texture.format {
+            PixelFormat::RgbPlanarF32 => engine.blur_rgb_planar_f32(
+                &texture,
+                &runtime.config,
+                &self.ctx,
+                &self.ctx.inference_stream,
+            ),
+            PixelFormat::RgbPlanarF16 => {
+                let f32 = self.kernels.convert_f16_to_f32(
+                    &texture,
+                    &self.ctx,
+                    &self.ctx.inference_stream,
+                )?;
+                let blurred = engine.blur_rgb_planar_f32(
+                    &f32,
+                    &runtime.config,
+                    &self.ctx,
+                    &self.ctx.inference_stream,
+                )?;
+                self.kernels
+                    .convert_f32_to_f16(&blurred, &self.ctx, &self.ctx.inference_stream)
+            }
+            other => Err(EngineError::FormatMismatch {
+                expected: PixelFormat::RgbPlanarF32,
+                actual: other,
+            }),
+        }
     }
 
-    fn apply_swap_stub(&self, _stage_id: u32) {
+    fn apply_swap_stub(&self, stage_id: crate::stage_graph::StageId) {
         self.push_warn_once(
             |state| &mut state.warned_swap_stub,
-            "face_swap",
+            "STAGE_STUB",
+            Some(stage_id),
             "FaceSwapAndEnhance stage is an MVP swap no-op stub in this release",
         );
     }
 
-    fn audit_checks(&self) -> Vec<AuditCheck> {
+    fn audit_checks(&self) -> Vec<AuditItem> {
         self.state.lock().unwrap().audit.clone()
     }
 
@@ -1219,10 +1315,16 @@ impl UpscaleBackend for GraphBackend {
                     })?;
                 }
                 StageConfig::FaceBlur { id, .. } => {
-                    self.apply_face_blur_stub(id.0);
+                    texture = self.apply_face_blur(*id, texture).map_err(|err| {
+                        EngineError::Pipeline(format!(
+                            "stage {} {:?} failed: {err}",
+                            id.0,
+                            StageKind::FaceBlur
+                        ))
+                    })?;
                 }
                 StageConfig::FaceSwapAndEnhance { id, .. } => {
-                    self.apply_swap_stub(id.0);
+                    self.apply_swap_stub(*id);
                 }
             }
         }

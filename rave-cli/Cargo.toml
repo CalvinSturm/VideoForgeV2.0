@@ -15,20 +15,17 @@ doc = false
 
 [features]
 default = []
-debug-alloc = ["rave-core/debug-alloc", "rave-pipeline/debug-alloc", "rave-tensorrt/debug-alloc"]
-audit-no-host-copies = ["rave-core/audit-no-host-copies", "rave-pipeline/audit-no-host-copies", "rave-tensorrt/audit-no-host-copies"]
+debug-alloc = ["rave-core/debug-alloc", "rave-pipeline/debug-alloc"]
+audit-no-host-copies = ["rave-core/audit-no-host-copies", "rave-pipeline/audit-no-host-copies"]
 
 [dependencies]
 rave-core = { workspace = true }
-rave-cuda = { workspace = true }
-rave-tensorrt = { workspace = true }
-rave-nvcodec = { workspace = true }
-rave-ffmpeg = { workspace = true }
 rave-pipeline = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [dev-dependencies]
-serde_json = "1"

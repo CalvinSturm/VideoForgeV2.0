@@ -7,6 +7,8 @@ use rave_core::error::{EngineError, Result};
 use rave_cuda::kernels::ModelPrecision;
 use rave_tensorrt::tensorrt::PrecisionPolicy;
 
+pub const GRAPH_SCHEMA_VERSION: u32 = 1;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct StageId(pub u32);
 
@@ -217,14 +219,47 @@ impl StageConfig {
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StageGraph {
+    pub graph_schema_version: u32,
     pub stages: Vec<StageConfig>,
+}
+
+impl Default for StageGraph {
+    fn default() -> Self {
+        Self {
+            graph_schema_version: GRAPH_SCHEMA_VERSION,
+            stages: Vec::new(),
+        }
+    }
 }
 
 impl StageGraph {
     pub fn from_json_str(data: &str) -> Result<Self> {
-        serde_json::from_str(data).map_err(|err| {
+        let value: serde_json::Value = serde_json::from_str(data).map_err(|err| {
+            EngineError::InvariantViolation(format!("Invalid stage graph JSON: {err}"))
+        })?;
+
+        let Some(version_value) = value.get("graph_schema_version") else {
+            return Err(EngineError::InvariantViolation(format!(
+                "Graph schema mismatch: expected {}, got missing",
+                GRAPH_SCHEMA_VERSION
+            )));
+        };
+        let Some(version) = version_value.as_u64() else {
+            return Err(EngineError::InvariantViolation(format!(
+                "Graph schema mismatch: expected {}, got non-integer",
+                GRAPH_SCHEMA_VERSION
+            )));
+        };
+        if version != GRAPH_SCHEMA_VERSION as u64 {
+            return Err(EngineError::InvariantViolation(format!(
+                "Graph schema mismatch: expected {}, got {}",
+                GRAPH_SCHEMA_VERSION, version
+            )));
+        }
+
+        serde_json::from_value(value).map_err(|err| {
             EngineError::InvariantViolation(format!("Invalid stage graph JSON: {err}"))
         })
     }
@@ -240,6 +275,12 @@ impl StageGraph {
     }
 
     pub fn validate(&self) -> Result<()> {
+        if self.graph_schema_version != GRAPH_SCHEMA_VERSION {
+            return Err(EngineError::InvariantViolation(format!(
+                "Graph schema mismatch: expected {}, got {}",
+                GRAPH_SCHEMA_VERSION, self.graph_schema_version
+            )));
+        }
         if self.stages.is_empty() {
             return Err(EngineError::InvariantViolation(
                 "StageGraph validation failed: at least one stage is required".into(),
@@ -319,17 +360,18 @@ impl StageGraph {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum AuditStatus {
+pub enum AuditLevel {
     Pass,
     Warn,
     Fail,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct AuditCheck {
-    pub name: String,
-    pub status: AuditStatus,
-    pub detail: String,
+pub struct AuditItem {
+    pub level: AuditLevel,
+    pub code: String,
+    pub stage_id: Option<StageId>,
+    pub message: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -355,7 +397,7 @@ pub struct PipelineReport {
     pub stage_checksums: Vec<String>,
     pub vram_current_bytes: usize,
     pub vram_peak_bytes: usize,
-    pub audit: Vec<AuditCheck>,
+    pub audit: Vec<AuditItem>,
 }
 
 pub fn hash_checkpoint_bytes(bytes: &[u8]) -> String {
@@ -387,6 +429,7 @@ mod tests {
     #[test]
     fn graph_validation_requires_enhance() {
         let graph = StageGraph {
+            graph_schema_version: GRAPH_SCHEMA_VERSION,
             stages: vec![StageConfig::FaceBlur {
                 id: StageId(1),
                 config: BlurConfig::default(),
@@ -401,6 +444,7 @@ mod tests {
     #[test]
     fn graph_validation_rejects_multiple_enhance_stages() {
         let graph = StageGraph {
+            graph_schema_version: GRAPH_SCHEMA_VERSION,
             stages: vec![enhance_stage(1), enhance_stage(2)],
         };
         let err = graph
@@ -412,6 +456,7 @@ mod tests {
     #[test]
     fn graph_validation_rejects_unsupported_combination() {
         let graph = StageGraph {
+            graph_schema_version: GRAPH_SCHEMA_VERSION,
             stages: vec![
                 enhance_stage(1),
                 StageConfig::FaceSwapAndEnhance {
@@ -433,6 +478,7 @@ mod tests {
     #[test]
     fn graph_validation_accepts_single_enhance_chain() {
         let graph = StageGraph {
+            graph_schema_version: GRAPH_SCHEMA_VERSION,
             stages: vec![
                 StageConfig::FaceBlur {
                     id: StageId(1),
@@ -445,11 +491,38 @@ mod tests {
     }
 
     #[test]
+    fn graph_validation_rejects_schema_mismatch() {
+        let graph = StageGraph {
+            graph_schema_version: GRAPH_SCHEMA_VERSION + 1,
+            stages: vec![enhance_stage(1)],
+        };
+        let err = graph.validate().expect_err("schema mismatch must fail");
+        assert!(err.to_string().contains("Graph schema mismatch"));
+    }
+
+    #[test]
     fn checkpoint_hash_is_deterministic() {
         let a = hash_checkpoint_bytes(b"abc123");
         let b = hash_checkpoint_bytes(b"abc123");
         let c = hash_checkpoint_bytes(b"abc124");
         assert_eq!(a, b);
         assert_ne!(a, c);
+    }
+
+    #[test]
+    fn from_json_rejects_missing_schema_version() {
+        let raw = r#"{"stages":[]}"#;
+        let err = StageGraph::from_json_str(raw).expect_err("missing schema must fail");
+        assert!(err.to_string().contains("Graph schema mismatch"));
+    }
+
+    #[test]
+    fn from_json_rejects_schema_version_mismatch() {
+        let raw = format!(
+            "{{\"graph_schema_version\":{},\"stages\":[]}}",
+            GRAPH_SCHEMA_VERSION + 1
+        );
+        let err = StageGraph::from_json_str(&raw).expect_err("mismatch schema must fail");
+        assert!(err.to_string().contains("Graph schema mismatch"));
     }
 }
