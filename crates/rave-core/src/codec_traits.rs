@@ -21,7 +21,11 @@ pub struct BitstreamPacket {
     /// Compressed bitstream data (Annex B or length-prefixed).
     /// Host memory is acceptable — this is codec-compressed (~10 KB/frame).
     pub data: Vec<u8>,
-    /// Presentation timestamp in stream time base.
+    /// Presentation timestamp in microseconds.
+    ///
+    /// Container-specific time bases are converted at the demux boundary
+    /// (for example in `rave-ffmpeg`) so downstream decode/encode stages
+    /// operate on one stable unit.
     pub pts: i64,
     /// Whether this packet encodes an IDR/keyframe.
     pub is_keyframe: bool,
@@ -33,6 +37,10 @@ pub struct BitstreamPacket {
 ///
 /// Implementations: file writer, muxer, network sender, etc.
 pub trait BitstreamSink: Send + 'static {
+    /// Write one encoded packet.
+    ///
+    /// `pts` and `dts` are in microseconds. Container muxers are responsible
+    /// for rescaling to stream time_base at the output boundary.
     fn write_packet(&mut self, data: &[u8], pts: i64, dts: i64, is_keyframe: bool) -> Result<()>;
     fn flush(&mut self) -> Result<()>;
 }

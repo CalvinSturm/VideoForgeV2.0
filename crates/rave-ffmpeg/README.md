@@ -44,3 +44,9 @@ fn inspect(path: &Path) -> Result<()> {
 - Demux path converts H.264/H.265 MP4-style payloads to Annex B when needed.
 - Mux path writes HEVC into container formats inferred from output extension.
 - Raw file source/sink are useful for simple bitstream workflows and testing.
+
+## Recent Hardening
+
+- BSF state machine now preserves packets across `EAGAIN` and retries safely.
+- EOF handling now performs explicit BSF flush + drain before terminal `None`.
+- Added deterministic unit tests for `EAGAIN` retry and flush-drain behavior.
