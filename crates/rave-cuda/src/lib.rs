@@ -1,4 +1,4 @@
-//! CUDA kernels and stream/event helpers for RAVE.
+#![doc = include_str!("../README.md")]
 
 pub mod kernels;
 pub mod stream;

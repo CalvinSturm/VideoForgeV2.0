@@ -1,4 +1,4 @@
-//! Pipeline orchestration.
+#![doc = include_str!("../README.md")]
 
 pub mod inference;
 pub mod pipeline;

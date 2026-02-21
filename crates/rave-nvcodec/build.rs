@@ -42,6 +42,17 @@ fn main() {
     }
     println!("cargo:rustc-link-search=native={}", cuda_lib_dir.display());
 
+    // On Linux (especially WSL2), driver libs are frequently outside CUDA_PATH.
+    // Add common locations so rust-lld can resolve -lcuda/-lnvcuvid/-lnvidia-encode.
+    if cfg!(target_os = "linux") {
+        for extra in ["/usr/lib/wsl/lib", "/usr/local/lib/wsl-nvidia"] {
+            let p = PathBuf::from(extra);
+            if p.exists() {
+                println!("cargo:rustc-link-search=native={}", p.display());
+            }
+        }
+    }
+
     let cuda_include_dir = cuda_root.join("include");
     if !cuda_include_dir.exists() {
         panic!(
@@ -64,17 +75,23 @@ fn main() {
         .join("third_party")
         .join("nvcodec");
 
-    if nvcodec_dir.exists()
-        && nvcodec_dir.join("nvcuvid.lib").exists()
-        && nvcodec_dir.join("nvencodeapi.lib").exists()
-    {
+    if cfg!(target_os = "windows") {
+        if nvcodec_dir.exists()
+            && nvcodec_dir.join("nvcuvid.lib").exists()
+            && nvcodec_dir.join("nvencodeapi.lib").exists()
+        {
+            println!("cargo:rustc-link-search=native={}", nvcodec_dir.display());
+        } else {
+            // Fallback: expect libs in CUDA toolkit directory
+            println!(
+                "cargo:warning=Video Codec SDK libs not found in {}. Falling back to CUDA lib dir.",
+                nvcodec_dir.display()
+            );
+        }
+    } else if nvcodec_dir.exists() {
+        // Linux toolchains consume .so/.a, but adding this path is harmless and
+        // supports repos that vendor Linux NVCodec artifacts in third_party/nvcodec.
         println!("cargo:rustc-link-search=native={}", nvcodec_dir.display());
-    } else {
-        // Fallback: expect libs in CUDA toolkit directory
-        println!(
-            "cargo:warning=Video Codec SDK libs not found in {}. Falling back to CUDA lib dir.",
-            nvcodec_dir.display()
-        );
     }
 
     println!("cargo:rustc-link-lib=dylib=nvcuvid");

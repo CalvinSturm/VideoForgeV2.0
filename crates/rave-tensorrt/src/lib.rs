@@ -1,4 +1,4 @@
-//! TensorRT backend implementation.
+#![doc = include_str!("../README.md")]
 
 pub mod tensorrt;
 

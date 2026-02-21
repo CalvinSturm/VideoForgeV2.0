@@ -18,6 +18,16 @@ rave/
 └── Cargo.toml
 ```
 
+## Crate Docs
+
+- `crates/rave-core/README.md`
+- `crates/rave-cuda/README.md`
+- `crates/rave-ffmpeg/README.md`
+- `crates/rave-nvcodec/README.md`
+- `crates/rave-pipeline/README.md`
+- `crates/rave-tensorrt/README.md`
+- `rave-cli/README.md`
+
 ## Build
 
 ```bash

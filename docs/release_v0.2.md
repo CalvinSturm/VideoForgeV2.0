@@ -23,7 +23,7 @@ Each above now has:
 - `version.workspace = true`
 - `license.workspace = true`
 - `repository.workspace = true`
-- `readme` (explicit path to root `README.md`)
+- `readme` (crate-local `README.md`)
 
 ## Publish order
 Use `--locked` and publish in dependency order:

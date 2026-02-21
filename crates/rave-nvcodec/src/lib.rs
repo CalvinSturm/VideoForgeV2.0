@@ -1,4 +1,4 @@
-//! NVIDIA codec wrappers for decode/encode.
+#![doc = include_str!("../README.md")]
 
 pub mod nvdec;
 pub mod nvenc;

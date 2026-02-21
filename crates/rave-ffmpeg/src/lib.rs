@@ -1,4 +1,4 @@
-//! FFmpeg and file I/O adapters.
+#![doc = include_str!("../README.md")]
 
 pub mod ffmpeg_demuxer;
 pub mod ffmpeg_muxer;

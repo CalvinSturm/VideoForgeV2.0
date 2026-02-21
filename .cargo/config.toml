@@ -1,0 +1,5 @@
+[target.x86_64-unknown-linux-gnu]
+rustflags = [
+  "-Lnative=/usr/lib/wsl/lib",
+  "-Lnative=/usr/local/lib/wsl-nvidia",
+]
