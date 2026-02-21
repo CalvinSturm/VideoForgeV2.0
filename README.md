@@ -28,6 +28,37 @@ rave/
 - `crates/rave-tensorrt/README.md`
 - `rave-cli/README.md`
 
+## Architecture Boundaries
+
+Allowed internal dependency graph (mechanically checked by `./scripts/check_deps.sh`):
+
+```text
+rave-core      -> (no internal deps)
+rave-cuda      -> rave-core
+rave-tensorrt  -> rave-core (optionally rave-cuda utilities)
+rave-nvcodec   -> rave-core (optionally rave-cuda utilities)
+rave-ffmpeg    -> rave-core
+rave-pipeline  -> rave-core, rave-cuda, rave-tensorrt, rave-nvcodec, rave-ffmpeg
+rave-cli       -> rave-core, rave-pipeline (direct low-level deps are discouraged)
+```
+
+Why these boundaries exist:
+- Keep `rave-core` portable and free of engine wiring concerns.
+- Keep leaf crates focused on one domain (CUDA, TensorRT, codec, container I/O).
+- Keep cross-domain composition in one place: `rave-pipeline`.
+
+Feature placement decision table:
+- Shared types/traits/errors: `rave-core`
+- CUDA kernels/utilities: `rave-cuda`
+- Inference runtime behavior: `rave-tensorrt`
+- Decode/encode hardware behavior: `rave-nvcodec`
+- Container demux/mux/probe behavior: `rave-ffmpeg`
+- Multi-stage orchestration and strict runtime audits: `rave-pipeline`
+- CLI argument parsing/output formatting: `rave-cli`
+
+No-host-copies checklist:
+- `docs/no_host_copies.md`
+
 ## Build
 
 ```bash

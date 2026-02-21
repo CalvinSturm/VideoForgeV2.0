@@ -1,5 +1,39 @@
 # VideoForge v2.0 — Architecture
 
+## Workspace crate boundaries
+
+RAVE enforces internal crate dependency boundaries via `cargo metadata` checks
+(`./scripts/check_deps.sh`, wired into CI).
+
+Allowed edges:
+
+```text
+rave-core      -> (no internal deps)
+rave-cuda      -> rave-core
+rave-tensorrt  -> rave-core (optional rave-cuda utilities)
+rave-nvcodec   -> rave-core (optional rave-cuda utilities)
+rave-ffmpeg    -> rave-core
+rave-pipeline  -> rave-core, rave-cuda, rave-tensorrt, rave-nvcodec, rave-ffmpeg
+rave-cli       -> rave-core, rave-pipeline (prefer composition through pipeline)
+```
+
+Boundary rationale:
+- `rave-core` is the neutral type/trait/error layer.
+- Domain crates (`rave-cuda`, `rave-tensorrt`, `rave-nvcodec`, `rave-ffmpeg`) stay focused.
+- `rave-pipeline` is the only composition root for full engine behavior.
+
+Decision table for new features:
+- Shared contracts and reusable primitives -> `rave-core`
+- Device kernels and stream helpers -> `rave-cuda`
+- ORT/TensorRT execution behavior -> `rave-tensorrt`
+- NVDEC/NVENC codec behavior -> `rave-nvcodec`
+- Container I/O and packet boundaries -> `rave-ffmpeg`
+- End-to-end stage wiring and strict no-host-copies policy -> `rave-pipeline`
+- CLI UX/contracts -> `rave-cli`
+
+No-host-copies checklist:
+- `docs/no_host_copies.md`
+
 ## Pipeline overview
 
 VideoForge runs four concurrent stages connected by bounded async channels. Frame data stays in GPU device memory from decode to encode — no `cudaMemcpy` in steady-state operation.
@@ -53,6 +87,7 @@ pub struct PipelineConfig {
     pub encoder_nv12_pitch: usize,
     pub model_precision: ModelPrecision,
     pub enable_profiler: bool,
+    pub strict_no_host_copies: bool,   // default: false
 }
 ```
 
